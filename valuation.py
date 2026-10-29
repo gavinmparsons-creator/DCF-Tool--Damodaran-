@@ -333,6 +333,12 @@ def _is_full_year_period(entry):
     understating flow metrics (revenue, EBIT, etc.) by roughly 4x.
     Point-in-time facts (balance sheet items like cash or debt) have no
     "start" date and aren't affected by this issue.
+
+    A missing "start" is only treated as a genuine instant fact by the
+    caller (_recipe_annual_entries) when NO entry for that tag ever has
+    one — some filers tag an interim per-share dividend DECLARATION as a
+    duration fact with no "start" at all (not a Q4-footnote collision,
+    a different EDGAR quirk), and that must not be waved through here.
     """
     from datetime import date
     start = entry.get("start")
@@ -385,8 +391,19 @@ def _recipe_annual_entries(all_tags, recipe):
         units = all_tags[tag].get("units", {})
         periods = {}
         for unit_key in units:  # whatever currency/unit this filer actually reports in — USD, EUR, CAD, shares, ...
-            for e in units[unit_key]:
+            entries = units[unit_key]
+            # If ANY entry for this tag+unit has a "start" date, this is a
+            # duration concept for this filer, not an instant one — so an
+            # entry missing "start" here isn't a balance-sheet-style point-
+            # in-time fact, it's a duration fact that simply wasn't tagged
+            # with a start (seen on quarterly dividend-declaration entries
+            # mixed into an annual dividends-per-share series). Don't let
+            # _is_full_year_period's instant-fact passthrough apply to it.
+            is_duration_concept = any(e.get("start") for e in entries)
+            for e in entries:
                 if e.get("form") not in ("10-K", "20-F", "40-F") or e.get("fy") is None:
+                    continue
+                if is_duration_concept and not e.get("start"):
                     continue
                 if not _is_full_year_period(e):
                     continue
