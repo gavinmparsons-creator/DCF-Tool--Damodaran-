@@ -798,6 +798,117 @@ def freshest_annual_value(facts_json, tag_candidates):
     return best
 
 
+# ---------------------------------------------------------------------
+# LATEST-QUARTER DATA: Damodaran values off the most recent trailing
+# twelve months, not the last 10-K, which can be up to a year old by the
+# time the next one is filed. Flow figures (revenue, EBIT, ...) become
+#     TTM = last fiscal year + this year's year-to-date - last year's
+#           same year-to-date
+# using the year-to-date columns in the latest 10-Q (each 10-Q reports
+# both the current and prior-year YTD). Balance-sheet figures (cash,
+# debt, equity, shares) simply take the latest 10-Q's value. When there's
+# no 10-Q newer than the 10-K — right after a 10-K, or for 20-F filers,
+# who don't file 10-Qs — the annual figure stands.
+# ---------------------------------------------------------------------
+
+def _days(start, end):
+    from datetime import date
+    return (date.fromisoformat(end) - date.fromisoformat(start)).days
+
+
+def _quarterly_entries(facts_json, tag, unit):
+    """All 10-Q entries for one tag in one unit."""
+    entries = _all_taxonomy_tags(facts_json).get(tag, {}).get("units", {}).get(unit, [])
+    return [e for e in entries if e.get("form") == "10-Q" and e.get("end")]
+
+
+def latest_quarter_instant(facts_json, tag, unit, after_end):
+    """The newest 10-Q balance-sheet (instant) value for `tag` dated after
+    `after_end`, as (value, end_date), or (None, None)."""
+    instants = [e for e in _quarterly_entries(facts_json, tag, unit)
+                if not e.get("start") and e["end"] > after_end]
+    if not instants:
+        return None, None
+    latest = max(instants, key=lambda e: (e["end"], e.get("filed", "")))
+    return latest["val"], latest["end"]
+
+
+def trailing_twelve_months(facts_json, tag, unit, annual_end, annual_val):
+    """
+    TTM for a flow figure: annual_val (the fiscal year ending annual_end)
+    + the latest year-to-date period that starts right after annual_end
+    - the matching prior-year year-to-date. Returns (ttm, ytd_end) or
+    (None, None) when there's no newer year-to-date figure or no matching
+    prior-year one to swap out. Dates are matched with a week's slack for
+    52/53-week fiscal years.
+    """
+    entries = [e for e in _quarterly_entries(facts_json, tag, unit) if e.get("start")]
+    ytd = [e for e in entries if e["end"] > annual_end and 0 < _days(annual_end, e["start"]) <= 8]
+    if not ytd:
+        return None, None
+    current = max(ytd, key=lambda e: (e["end"], e.get("filed", "")))
+    length = _days(current["start"], current["end"])
+    prior = [e for e in entries
+             if abs(_days(e["end"], current["end"]) - 364) <= 8
+             and abs(_days(e["start"], e["end"]) - length) <= 8]
+    if not prior:
+        return None, None
+    prior_ytd = max(prior, key=lambda e: e.get("filed", ""))
+    return annual_val + current["val"] - prior_ytd["val"], current["end"]
+
+
+def freshest_instant(facts_json, tag_candidates):
+    """freshest_annual_value for a balance-sheet item, upgraded to the
+    latest 10-Q value when one is newer — so items pulled outside the
+    main financials dict (short-term investments, leases, the equity
+    bridge) are dated the same as cash and debt. Same return shape."""
+    val, tag, fy, unit = freshest_annual_value(facts_json, tag_candidates)
+    if val is None or not tag or "+" in tag:
+        return val, tag, fy, unit
+    periods = _recipe_annual_entries(_all_taxonomy_tags(facts_json), tag)
+    if periods:
+        q_val, _ = latest_quarter_instant(facts_json, tag, unit, max(periods))
+        if q_val is not None:
+            val = q_val
+    return val, tag, fy, unit
+
+
+# Which METRIC_TAGS entries are flows (TTM) vs balance-sheet instants
+# (latest quarter). Interest expense and R&D stay annual: both are
+# re-pulled with their own multi-year logic elsewhere (the synthetic
+# rating, R&D capitalization), so updating only the headline figure would
+# leave them inconsistent. Dividends stay annual too.
+TTM_FLOW_METRICS = {"revenue", "operating_income", "depreciation_amortization", "capex",
+                    "income_tax_expense", "pretax_income"}
+LATEST_QUARTER_INSTANT_METRICS = {"total_debt_current", "total_debt_noncurrent", "cash",
+                                  "shares_outstanding", "book_equity"}
+
+
+def apply_latest_quarter(facts_json, financials):
+    """Update `financials` in place with TTM flows and latest-quarter
+    balances wherever a 10-Q is newer than the 10-K. Each updated entry
+    gets an "as_of" date and "ttm"/"quarterly" flag for the report;
+    fiscal_year is left as the annual one, which the stale-data checks
+    compare on. Split-line recipes (summed tags) stay annual."""
+    all_tags = _all_taxonomy_tags(facts_json)
+    for metric, info in financials.items():
+        tag = info.get("tag")
+        if info.get("value") is None or not tag or "+" in tag:
+            continue
+        periods = _recipe_annual_entries(all_tags, tag)
+        if not periods:
+            continue
+        annual_end = max(periods)
+        if metric in TTM_FLOW_METRICS:
+            ttm, as_of = trailing_twelve_months(facts_json, tag, info["unit"], annual_end, info["value"])
+            if ttm is not None:
+                info.update(value=ttm, as_of=as_of, ttm=True)
+        elif metric in LATEST_QUARTER_INSTANT_METRICS:
+            val, as_of = latest_quarter_instant(facts_json, tag, info["unit"], annual_end)
+            if val is not None:
+                info.update(value=val, as_of=as_of, quarterly=True)
+
+
 # Tags for a company's TOTAL debt, checked only when the usual current /
 # long-term pair has gone stale. A stale debt tag means one of two very
 # different things: the company RENAMED its debt tag (Realty Income: a
@@ -1038,6 +1149,7 @@ def pull_financials(cik):
     for metric, tags in METRIC_TAGS.items():
         val, tag, fy, unit = get_latest_annual_value(facts, tags)
         results[metric] = {"value": val, "tag": tag, "fiscal_year": fy, "unit": unit}
+    apply_latest_quarter(facts, results)
     return results, facts
 
 
@@ -1208,7 +1320,9 @@ def print_financials_report(company_name, financials):
                     and most_recent_fy - info["fiscal_year"] >= 2:
                 flag = "  ⚠ STALE — years behind other metrics, verify manually"
                 stale.append(metric)
-            print(f"  {metric:28s}: {display:>20s}   (tag: {info['tag']}, FY{info['fiscal_year']}){flag}")
+            period = (f"TTM to {info['as_of']}" if info.get("ttm") else
+                      f"as of {info['as_of']}" if info.get("quarterly") else f"FY{info['fiscal_year']}")
+            print(f"  {metric:28s}: {display:>20s}   (tag: {info['tag']}, {period}){flag}")
 
     if stale:
         print(f"\n  ⚠⚠ WARNING — possibly stale data: {', '.join(stale)}")
@@ -1734,11 +1848,29 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     rebuilt = pretax_plus_interest_series(facts, years=1)
     if financials["operating_income"]["value"] is None and rebuilt:
         latest_rebuilt = rebuilt[-1]
+        period_label = f"FY{latest_rebuilt['fiscal_year']}"
+        # Keep the rebuild on the same TTM basis as revenue: TTM pretax
+        # (already in financials) + TTM interest expense.
+        pretax_info = financials["pretax_income"]
+        _iv, interest_tag, _ify, interest_unit = freshest_annual_value(facts, GROSS_INTEREST_EXPENSE_TAGS)
+        if pretax_info.get("ttm") and interest_tag:
+            interest_periods = _recipe_annual_entries(_all_taxonomy_tags(facts), interest_tag)
+            if interest_periods:
+                i_end = max(interest_periods)
+                interest_ttm, _ = trailing_twelve_months(facts, interest_tag, interest_unit, i_end,
+                                                          interest_periods[i_end][0])
+                if interest_ttm is not None:
+                    # pretax_info's value is already FX-converted; convert interest to match
+                    if fx_currency and interest_unit == fx_currency:
+                        interest_ttm *= fx_rate
+                    latest_rebuilt = {**latest_rebuilt, "val": pretax_info["value"] + interest_ttm,
+                                      "unit": None}
+                    period_label = f"TTM to {pretax_info['as_of']}"
         if fx_currency and latest_rebuilt["unit"] == fx_currency:
             latest_rebuilt = {**latest_rebuilt, "val": latest_rebuilt["val"] * fx_rate}
         print("  'EBIT / operating income' isn't tagged — this company's income statement has no")
-        print(f"  operating-income line. Rebuilt as pretax income + interest expense (FY"
-              f"{latest_rebuilt['fiscal_year']}): ${latest_rebuilt['val']:,.0f}")
+        print(f"  operating-income line. Rebuilt as pretax income + interest expense ({period_label}): "
+              f"${latest_rebuilt['val']:,.0f}")
         ebit = prompt_number("  Press Enter to use it, or type a corrected EBIT (in dollars): ",
                              default=latest_rebuilt["val"])
     else:
@@ -1912,7 +2044,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
 
     total_debt = resolve_total_debt(financials, facts, stale, fx_currency, fx_rate)
     cash = get_metric_value(financials, "cash", "cash and equivalents", stale)
-    sti_val, sti_tag, sti_fy, sti_unit = freshest_annual_value(facts, SHORT_TERM_INVESTMENT_TAGS)
+    sti_val, sti_tag, sti_fy, sti_unit = freshest_instant(facts, SHORT_TERM_INVESTMENT_TAGS)
     cash_fy = financials["cash"]["fiscal_year"]
     if sti_val and cash_fy is not None and sti_fy >= cash_fy:
         if fx_currency and sti_unit == fx_currency:
@@ -1938,9 +2070,9 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     # them into long-term debt, so adding them could double count. ----
     lease_liability, lease_interest = 0.0, 0.0
     latest_fy_all = max(info["fiscal_year"] for info in financials.values() if info["fiscal_year"] is not None)
-    ll_val, ll_tag, ll_fy, ll_unit = freshest_annual_value(facts, ["OperatingLeaseLiability"])
+    ll_val, ll_tag, ll_fy, ll_unit = freshest_instant(facts, ["OperatingLeaseLiability"])
     if ll_val is None or ll_fy < latest_fy_all:
-        parts = [freshest_annual_value(facts, [t]) for t in
+        parts = [freshest_instant(facts, [t]) for t in
                  ("OperatingLeaseLiabilityCurrent", "OperatingLeaseLiabilityNoncurrent")]
         if all(v is not None and fy is not None and fy >= latest_fy_all for v, _, fy, _ in parts):
             ll_val, ll_tag, ll_fy, ll_unit = (sum(v for v, _, _, _ in parts),
@@ -2506,8 +2638,8 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     # they're reported per award type, which companyfacts leaves out).
     # Book values stand in for market values on minority interests and
     # equity stakes. Each item is shown and can be edited. ----
-    def current_value(tags):
-        val, tag, fy, unit = freshest_annual_value(facts, tags)
+    def current_value(tags, instant=True):
+        val, tag, fy, unit = (freshest_instant if instant else freshest_annual_value)(facts, tags)
         if val is None or fy is None or fy < latest_fy_all:
             return 0.0, None
         if fx_currency and unit == fx_currency:
@@ -2524,8 +2656,8 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         ["ShareBasedCompensationArrangementByShareBasedPaymentAwardOptionsOutstandingNumber"])
     option_strike, _ = current_value(
         ["ShareBasedCompensationArrangementByShareBasedPaymentAwardOptionsOutstandingWeightedAverageExercisePrice"])
-    diluted_shares, _ = current_value(["WeightedAverageNumberOfDilutedSharesOutstanding"])
-    basic_shares, _ = current_value(["WeightedAverageNumberOfSharesOutstandingBasic"])
+    diluted_shares, _ = current_value(["WeightedAverageNumberOfDilutedSharesOutstanding"], instant=False)
+    basic_shares, _ = current_value(["WeightedAverageNumberOfSharesOutstandingBasic"], instant=False)
 
     option_volatility = industry_equity_vol or 0.40
     option_years = 5.0  # weighted remaining term isn't in companyfacts; employee options typically run ~4-6 yrs
