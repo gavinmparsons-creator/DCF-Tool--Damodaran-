@@ -354,6 +354,33 @@ def _is_full_year_period(entry):
     return 335 <= days <= 380  # true annual period, not a quarter
 
 
+def _fiscal_year_of_period(entry):
+    """
+    The fiscal year a reported PERIOD belongs to, from its end date.
+
+    EDGAR's own "fy" field is the fiscal year of the FILING, not of the
+    period: a FY2025 10-K also reports FY2024 and FY2023, all tagged
+    fy=2025, so trailing series came out labeled "FY2023-FY2025" for four
+    distinct years (and anything counting years from the labels, like the
+    revenue CAGR, miscounted). Filers' own fy tags aren't reliable either
+    (Target's tag two different years as fy=2018).
+
+    A year ending January-March is labeled with the prior calendar year:
+    Target's year ending Feb 1, 2025 is its fiscal 2024, and a 52/53-week
+    year ending Jan 3, 2026 is really calendar 2025. (A few retailers,
+    e.g. Walmart, name that year by its end instead — the labels are then
+    one off from their naming but still unique and in order, which is
+    what the math needs.) Falls back to the filing's fy if the end date
+    can't be parsed.
+    """
+    end = entry.get("end", "")
+    try:
+        year, month = int(end[:4]), int(end[5:7])
+    except ValueError:
+        return entry.get("fy")
+    return year - 1 if month <= 3 else year
+
+
 def _all_taxonomy_tags(facts_json):
     """Merge every taxonomy EDGAR gives us for this filer (us-gaap for
     domestic 10-K filers, ifrs-full for foreign private issuers filing
@@ -407,7 +434,7 @@ def _recipe_annual_entries(all_tags, recipe):
                     continue
                 if not _is_full_year_period(e):
                     continue
-                periods[e.get("end", "")] = (e["val"], unit_key, e.get("fy"))
+                periods[e.get("end", "")] = (e["val"], unit_key, _fiscal_year_of_period(e))
         if not periods:
             return {}
         per_tag_periods.append(periods)
