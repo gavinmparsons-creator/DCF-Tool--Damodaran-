@@ -1916,6 +1916,46 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
 
     book_equity = get_metric_value(financials, "book_equity", "total stockholders' equity (book value)", stale)
 
+    # ---- Operating leases as debt (Damodaran): a lease commitment is a
+    # fixed obligation like a loan, and since 2019 (ASC 842) companies
+    # report the present value of it on the balance sheet. Treat it as
+    # debt — which feeds D/E, WACC and invested capital — and move the
+    # financing part of lease cost out of operating expenses: operating
+    # lease cost is roughly depreciation of the leased asset plus
+    # interest, so EBIT gets the imputed interest (liability x the
+    # company's own disclosed lease discount rate) added back. Interest
+    # coverage below includes that lease interest too. Matters most for
+    # retailers, restaurants and airlines (Walmart: $15.6B of operating
+    # leases). Finance leases are left alone: many filers already fold
+    # them into long-term debt, so adding them could double count. ----
+    lease_liability, lease_interest = 0.0, 0.0
+    latest_fy_all = max(info["fiscal_year"] for info in financials.values() if info["fiscal_year"] is not None)
+    ll_val, ll_tag, ll_fy, ll_unit = freshest_annual_value(facts, ["OperatingLeaseLiability"])
+    if ll_val is None or ll_fy < latest_fy_all:
+        parts = [freshest_annual_value(facts, [t]) for t in
+                 ("OperatingLeaseLiabilityCurrent", "OperatingLeaseLiabilityNoncurrent")]
+        if all(v is not None and fy is not None and fy >= latest_fy_all for v, _, fy, _ in parts):
+            ll_val, ll_tag, ll_fy, ll_unit = (sum(v for v, _, _, _ in parts),
+                                              "OperatingLeaseLiabilityCurrent+Noncurrent", parts[0][2], parts[0][3])
+    if ll_val and ll_fy is not None and ll_fy >= latest_fy_all:
+        if fx_currency and ll_unit == fx_currency:
+            ll_val *= fx_rate
+        rate_val, _, rate_fy, _ = freshest_annual_value(facts, ["OperatingLeaseWeightedAverageDiscountRatePercent"])
+        if rate_val and rate_fy is not None and rate_fy >= latest_fy_all and 0 < rate_val < 0.30:
+            lease_rate, rate_note = rate_val, "the company's disclosed lease discount rate"
+        else:
+            lease_rate, rate_note = DEFAULT_COST_OF_DEBT, "a default rate (no lease discount rate disclosed)"
+        print(f"\n{'='*60}")
+        print("  Operating leases (treated as debt, Damodaran-style)")
+        print(f"{'='*60}")
+        print(f"  Operating lease liability: ${ll_val:,.0f}  (tag: {ll_tag}, FY{ll_fy})")
+        print(f"  Imputed lease interest:    ${ll_val * lease_rate:,.0f}  ({lease_rate:.2%}, {rate_note})")
+        print(f"  -> debt +${ll_val:,.0f}, EBIT +${ll_val * lease_rate:,.0f} (lease interest is financing, not operating)")
+        if input("  Press Enter to include leases, or type n to leave them out: ").strip().lower() != "n":
+            lease_liability, lease_interest = ll_val, ll_val * lease_rate
+            total_debt += lease_liability
+            ebit += lease_interest
+
     latest_tax_rate = tax_expense / pretax_income if pretax_income else None
     effective_tax_rate, tax_rate_years, tax_rate_n = trailing_effective_tax_rate(facts)
     print(f"\n{'='*60}")
@@ -2111,6 +2151,9 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         latest_interest_expense *= fx_rate
     is_large_firm = market_cap > 5_000_000_000
     synthetic_cod, interest_coverage, synthetic_rating, default_spread = None, None, None, None
+    if lease_interest:
+        # Leases are debt now, so their interest counts toward coverage.
+        latest_interest_expense = (latest_interest_expense or 0.0) + lease_interest
     if latest_interest_expense:
         synthetic_cod, interest_coverage, synthetic_rating, default_spread = model.synthetic_cost_of_debt(
             ebit, latest_interest_expense, risk_free_rate, large_firm=is_large_firm)
@@ -2444,6 +2487,9 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     print(f"  High-growth-stage rate:    {fcff_growth:.2%}  (reinvestment-rate-derived; type an override above to change)")
     print(f"  Assumed terminal growth:   {terminal_growth:.2%}  (type an override above to change)")
     print(f"  Return on new capital:     {ronic_label}  (stable-growth reinvestment = g / this)")
+    if lease_liability:
+        print(f"  Operating leases:          ${lease_liability:,.0f} added to debt, "
+              f"${lease_interest:,.0f} added back to EBIT")
     if rd_result is not None:
         print(f"  R&D capitalized:           EBIT {rd_result['ebit_adjustment']:+,.0f}, "
               f"invested capital +${rd_result['research_asset']:,.0f} (see above)")
