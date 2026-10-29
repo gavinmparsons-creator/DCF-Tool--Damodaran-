@@ -2169,6 +2169,48 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     if tg_input:
         print(f"  Using override terminal growth rate: {terminal_growth:.2%}")
 
+    # ---- Return on new capital in stable growth (Damodaran): growth past
+    # the forecast isn't free — growing at g forever takes reinvesting
+    # g / RONIC of NOPAT every year. Both DCFs build their terminal value
+    # this way (model.terminal_value_consistent) instead of growing the
+    # last forecast year's cash flow, whose reinvestment says nothing
+    # about perpetual growth. His default sets RONIC to the cost of
+    # capital: competition eventually wipes out excess returns on NEW
+    # investment, so growth stops adding value. Only a durable moat
+    # justifies more. ----
+    print(f"\n{'='*60}")
+    print("  Return on new capital in stable growth")
+    print(f"{'='*60}")
+    print(f"  Current ROIC: " + (f"{roic:.2%}" if roic is not None else "n/a") +
+          f"   WACC: {discount_rate:.2%}")
+    print(f"  Default: return on new capital = WACC, so stable-growth reinvestment is")
+    print(f"  {terminal_growth:.2%} / {discount_rate:.2%} = {terminal_growth / discount_rate:.0%} of NOPAT "
+          "and growth adds no value (Damodaran's")
+    print("  standard assumption). Type a higher return only for a durable competitive advantage.")
+    while True:
+        ronic_input = input("  Press Enter for WACC, or type a return on new capital as a percent "
+                            "(e.g. 12 for 12%): ").strip()
+        if not ronic_input:
+            return_on_new_capital = None
+            break
+        try:
+            return_on_new_capital = parse_number(ronic_input) / 100
+        except ValueError:
+            print("    Please type a number.")
+            continue
+        if return_on_new_capital <= 0:
+            print("    It has to be positive.")
+            continue
+        print(f"  Using {return_on_new_capital:.2%}: stable-growth reinvestment = "
+              f"{terminal_growth / return_on_new_capital:.0%} of NOPAT.")
+        break
+    ronic_label = (f"{return_on_new_capital:.2%}" if return_on_new_capital is not None
+                   else "= WACC (no excess returns on new investment)")
+    # The terminal NOPAT basis is taxed at the marginal rate: effective
+    # rates drift toward it as tax breaks and NOL shields run out, and
+    # Damodaran's Ginzu uses the marginal rate in stable growth.
+    terminal_nopat_basis = ebit * (1 - DEFAULT_MARGINAL_TAX_RATE)
+
     # ---- Growth stage: a flat growth rate for N years then a hard drop to
     # terminal growth is only realistic for a mature company. A young or
     # still-growing company gets a multi-year runway at its high-growth
@@ -2401,6 +2443,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     print(f"  Base-year FCFF:            ${fcff:,.0f}")
     print(f"  High-growth-stage rate:    {fcff_growth:.2%}  (reinvestment-rate-derived; type an override above to change)")
     print(f"  Assumed terminal growth:   {terminal_growth:.2%}  (type an override above to change)")
+    print(f"  Return on new capital:     {ronic_label}  (stable-growth reinvestment = g / this)")
     if rd_result is not None:
         print(f"  R&D capitalized:           EBIT {rd_result['ebit_adjustment']:+,.0f}, "
               f"invested capital +${rd_result['research_asset']:,.0f} (see above)")
@@ -2415,6 +2458,8 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         total_debt=total_debt,
         cash=cash,
         shares_outstanding=shares_out,
+        base_nopat=terminal_nopat_basis,
+        return_on_new_capital=return_on_new_capital,
     )
 
     # ---- Qualitative adjustment: anything not captured above — moat
@@ -2462,7 +2507,8 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     if fcff > 0:
         implied_growth = model.solve_implied_growth_rate(
             share_price, fcff, high_growth_years, fade_years,
-            discount_rate, terminal_growth, total_debt, cash, shares_out)
+            discount_rate, terminal_growth, total_debt, cash, shares_out,
+            base_nopat=terminal_nopat_basis, return_on_new_capital=return_on_new_capital)
         print(f"\n{'='*60}")
         print("  Market-implied growth rate")
         print(f"{'='*60}")
@@ -2757,7 +2803,8 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         narrative_range = model.run_valuation_range_narrative(
             revenue, initial_growth, current_margin, target_margin,
             tax_rate_path, sales_to_capital, (initial_wacc, discount_rate), terminal_growth,
-            total_debt, cash, shares_out, years=narrative_years)
+            total_debt, cash, shares_out, years=narrative_years,
+            return_on_new_capital=return_on_new_capital)
         print()
         for label in ("low", "base", "high"):
             r = narrative_range[label]
