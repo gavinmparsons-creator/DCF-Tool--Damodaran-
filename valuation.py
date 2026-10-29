@@ -46,7 +46,10 @@ NOTES:
       so it stays consistent with the USD market data.
 """
 
+import os
+import re
 import sys
+import html
 import json
 import time
 import argparse
@@ -89,7 +92,8 @@ FMP_PROFILE_URL = "https://financialmodelingprep.com/api/v3/profile/{ticker}?api
 
 # Reasonable defaults used if you don't override them at the prompt.
 DEFAULT_RISK_FREE_RATE = 0.045   # ~10-year Treasury yield, adjust as needed
-DEFAULT_EQUITY_RISK_PREMIUM = 0.055  # Damodaran's commonly cited long-run US ERP
+DEFAULT_EQUITY_RISK_PREMIUM = 0.055  # fallback only — normally Damodaran's current implied ERP (see load_damodaran_data)
+DEFAULT_MARGINAL_TAX_RATE = 0.25    # US federal + state statutory, for relevering betas (Damodaran relevers at the marginal rate)
 DEFAULT_TERMINAL_GROWTH = 0.025  # roughly long-run GDP growth
 DEFAULT_FCFF_GROWTH = 0.05       # near-term growth rate for projected FCFF
 DEFAULT_COST_OF_DEBT = 0.05      # fallback only — used when interest expense isn't found at all; normally replaced by the synthetic-rating cost of debt (see run_full_valuation)
@@ -1211,6 +1215,383 @@ def print_financials_report(company_name, financials):
         print("    You'll need to fill these in manually from the 10-K.")
     print()
     return missing, stale
+
+
+# ---------------------------------------------------------------------
+# DAMODARAN DATA: industry betas and the current implied equity risk
+# premium, pulled from his site so every run uses the same consistent,
+# current inputs instead of a noisy single-company regression beta and a
+# hardcoded ERP. A company's own regression beta has a standard error of
+# roughly 0.2-0.3; an industry average across dozens or hundreds of firms
+# cancels most of that noise (the error shrinks roughly with the square
+# root of the number of firms), which is why Damodaran's bottom-up beta
+# starts from the industry, not the company.
+#
+# Cached in data/damodaran_cache.json (git-ignored) and refreshed when
+# more than a week old — the betas change each January, the ERP monthly.
+# If his site can't be reached, the last cached values are used, and with
+# no cache at all the run falls back to the regression beta and the
+# DEFAULT_EQUITY_RISK_PREMIUM above.
+# ---------------------------------------------------------------------
+
+DAMODARAN_BETAS_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/Betas.html"
+DAMODARAN_HOME_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/home.htm"
+EDGAR_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+DAMODARAN_CACHE_PATH = os.path.join(DATA_DIR, "damodaran_cache.json")
+INDUSTRY_MAP_PATH = os.path.join(DATA_DIR, "industry_map.json")
+DAMODARAN_CACHE_MAX_AGE_DAYS = 7
+
+
+def fetch_text_or_none(url):
+    """Fetch a web page as text, or None on any failure. Damodaran's site
+    isn't EDGAR, so it gets an ordinary browser User-Agent."""
+    try:
+        with urlopen(Request(url, headers={"User-Agent": "Mozilla/5.0"}), timeout=20) as resp:
+            return resp.read().decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+
+def _html_table_rows(page):
+    """Every <tr> on the page as a list of cleaned cell strings."""
+    rows = []
+    for row in re.findall(r"(?is)<tr[^>]*>(.*?)</tr>", page):
+        cells = re.findall(r"(?is)<t[dh][^>]*>(.*?)</t[dh]>", row)
+        rows.append([" ".join(html.unescape(re.sub(r"<[^>]+>", "", c)).split()) for c in cells])
+    return rows
+
+
+def parse_damodaran_betas(page):
+    """
+    Parse Damodaran's US industry beta table (Betas.html). Columns are
+    found by header name, not position, so a reordered table still
+    parses. Returns {"updated": "January 2026", "industries": {name:
+    {"firms", "beta", "de_ratio", "unlevered_beta", "unlevered_beta_cash"}}},
+    or None if the table isn't recognizable.
+    """
+    rows = _html_table_rows(page)
+    header = next((r for r in rows if r and r[0] == "Industry Name"), None)
+    if header is None:
+        return None
+    def col(name):
+        return next(i for i, h in enumerate(header) if h.lower() == name.lower())
+    try:
+        i_firms, i_beta, i_de = col("Number of firms"), col("Beta"), col("D/E Ratio")
+        i_unlev, i_cash = col("Unlevered beta"), col("Unlevered beta corrected for cash")
+    except StopIteration:
+        return None
+    industries = {}
+    for r in rows:
+        if len(r) <= max(i_firms, i_beta, i_de, i_unlev, i_cash) or r[0] == "Industry Name":
+            continue
+        try:
+            industries[r[0]] = {
+                "firms": int(r[i_firms]), "beta": float(r[i_beta]),
+                "de_ratio": float(r[i_de].rstrip("%")) / 100,
+                "unlevered_beta": float(r[i_unlev]), "unlevered_beta_cash": float(r[i_cash]),
+            }
+        except ValueError:
+            continue
+    updated = re.search(r"(?i)Updated in ([A-Za-z]+ \d{4})", page)
+    return {"updated": updated.group(1) if updated else "unknown date", "industries": industries} if industries else None
+
+
+def parse_damodaran_erp(page):
+    """
+    Read the headline implied ERP off Damodaran's home page, e.g.
+    "Implied ERP on October 1, 2026 = 4.20% (Trailing 12 month, with
+    adjusted payout)" — his primary monthly estimate. (His ERPbymonth.xlsx
+    and annual history page lag well behind the home page.) Returns
+    {"erp": 0.042, "as_of": "October 1, 2026"} or None.
+    """
+    text = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", page)).split())
+    m = re.search(r"Implied ERP on ([A-Za-z]+ \d{1,2}, \d{4}) = ([\d.\s]+)%", text)
+    if not m:
+        return None
+    try:
+        return {"erp": float(m.group(2).replace(" ", "")) / 100, "as_of": m.group(1)}
+    except ValueError:
+        return None
+
+
+def load_damodaran_data():
+    """
+    Industry betas and the current implied ERP, from cache when it's
+    under DAMODARAN_CACHE_MAX_AGE_DAYS old, otherwise freshly fetched.
+    Each piece falls back independently: a failed fetch keeps that
+    piece's cached copy (noted as stale). Returns {"betas": ... or None,
+    "erp": ... or None}.
+    """
+    cache = {}
+    try:
+        with open(DAMODARAN_CACHE_PATH) as f:
+            cache = json.load(f)
+    except (OSError, ValueError):
+        pass
+    now = datetime.now(timezone.utc)
+    def is_fresh(piece):
+        try:
+            fetched = datetime.fromisoformat(cache[piece]["fetched"])
+            return (now - fetched).days < DAMODARAN_CACHE_MAX_AGE_DAYS
+        except (KeyError, ValueError, TypeError):
+            return False
+
+    changed = False
+    for piece, url, parser in (("betas", DAMODARAN_BETAS_URL, parse_damodaran_betas),
+                               ("erp", DAMODARAN_HOME_URL, parse_damodaran_erp)):
+        if is_fresh(piece):
+            continue
+        page = fetch_text_or_none(url)
+        parsed = parser(page) if page else None
+        if parsed:
+            cache[piece] = {"fetched": now.isoformat(), "data": parsed}
+            changed = True
+        elif piece in cache:
+            print(f"  (Couldn't refresh Damodaran's {piece} — using the copy cached "
+                  f"{cache[piece]['fetched'][:10]}.)")
+    if changed:
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with open(DAMODARAN_CACHE_PATH, "w") as f:
+                json.dump(cache, f, indent=1)
+        except OSError:
+            pass  # caching is a convenience; the run continues without it
+    return {piece: cache[piece]["data"] if piece in cache else None for piece in ("betas", "erp")}
+
+
+# SEC industry (SIC) code ranges -> Damodaran industry, checked in order,
+# FIRST match wins — so narrow codes are listed before the broad range
+# they sit inside. Only a SUGGESTION: SIC codes are old and coarse (Viking,
+# a clinical-stage biotech, files as 2834 "Pharmaceutical Preparations"),
+# so the user always confirms, and the choice is saved per ticker.
+SIC_TO_DAMODARAN_INDUSTRY = [
+    (100, 999, "Farming/Agriculture"),
+    (1040, 1049, "Precious Metals"),
+    (1000, 1099, "Metals & Mining"),
+    (1200, 1299, "Coal & Related Energy"),
+    (1311, 1311, "Oil/Gas (Production and Exploration)"),
+    (1381, 1389, "Oilfield Svcs/Equip."),
+    (1400, 1499, "Metals & Mining"),
+    (1520, 1531, "Homebuilding"),
+    (1500, 1799, "Engineering/Construction"),
+    (2080, 2085, "Beverage (Alcoholic)"),
+    (2086, 2087, "Beverage (Soft)"),
+    (2000, 2099, "Food Processing"),
+    (2100, 2199, "Tobacco"),
+    (2200, 2399, "Apparel"),
+    (2400, 2499, "Paper/Forest Products"),
+    (2500, 2599, "Furn/Home Furnishings"),
+    (2650, 2679, "Packaging & Container"),
+    (2600, 2699, "Paper/Forest Products"),
+    (2700, 2799, "Publishing & Newspapers"),
+    (2836, 2836, "Drugs (Biotechnology)"),
+    (2830, 2835, "Drugs (Pharmaceutical)"),
+    (2840, 2844, "Household Products"),
+    (2800, 2829, "Chemical (Basic)"),
+    (2850, 2899, "Chemical (Specialty)"),
+    (2900, 2999, "Oil/Gas (Integrated)"),
+    (3000, 3099, "Rubber& Tires"),
+    (3100, 3199, "Shoe"),
+    (3200, 3299, "Building Materials"),
+    (3310, 3329, "Steel"),
+    (3300, 3399, "Metals & Mining"),
+    (3570, 3579, "Computers/Peripherals"),
+    (3400, 3599, "Machinery"),
+    (3630, 3659, "Electronics (Consumer & Office)"),
+    (3600, 3629, "Electrical Equipment"),
+    (3660, 3669, "Telecom. Equipment"),
+    (3674, 3674, "Semiconductor"),
+    (3670, 3699, "Electronics (General)"),
+    (3714, 3714, "Auto Parts"),
+    (3710, 3716, "Auto & Truck"),
+    (3720, 3729, "Aerospace/Defense"),
+    (3730, 3732, "Shipbuilding & Marine"),
+    (3740, 3743, "Transportation (Railroads)"),
+    (3760, 3769, "Aerospace/Defense"),
+    (3812, 3812, "Aerospace/Defense"),
+    (3840, 3851, "Healthcare Products"),
+    (3800, 3899, "Electronics (General)"),
+    (3900, 3999, "Recreation"),
+    (4011, 4013, "Transportation (Railroads)"),
+    (4200, 4299, "Trucking"),
+    (4400, 4499, "Shipbuilding & Marine"),
+    (4500, 4599, "Air Transport"),
+    (4600, 4699, "Oil/Gas Distribution"),
+    (4000, 4799, "Transportation"),
+    (4812, 4812, "Telecom (Wireless)"),
+    (4830, 4839, "Broadcasting"),
+    (4840, 4849, "Cable TV"),
+    (4800, 4899, "Telecom. Services"),
+    (4920, 4925, "Oil/Gas Distribution"),
+    (4940, 4949, "Utility (Water)"),
+    (4950, 4959, "Environmental & Waste Services"),
+    (4900, 4919, "Power"),
+    (4900, 4999, "Utility (General)"),
+    (5140, 5149, "Food Wholesalers"),
+    (5000, 5199, "Retail (Distributors)"),
+    (5200, 5299, "Retail (Building Supply)"),
+    (5300, 5399, "Retail (General)"),
+    (5400, 5499, "Retail (Grocery and Food)"),
+    (5500, 5599, "Retail (Automotive)"),
+    (5800, 5899, "Restaurant/Dining"),
+    (5600, 5999, "Retail (Special Lines)"),
+    (6020, 6029, "Banks (Regional)"),
+    (6000, 6099, "Banks (Regional)"),
+    (6282, 6282, "Investments & Asset Management"),
+    (6200, 6299, "Brokerage & Investment Banking"),
+    (6311, 6311, "Insurance (Life)"),
+    (6331, 6331, "Insurance (Prop/Cas.)"),
+    (6300, 6399, "Insurance (General)"),
+    (6798, 6798, "R.E.I.T."),
+    (6500, 6599, "Real Estate (Operations & Services)"),
+    (6100, 6199, "Financial Svcs. (Non-bank & Insurance)"),
+    (6700, 6799, "Investments & Asset Management"),
+    (7000, 7099, "Hotel/Gaming"),
+    (7310, 7319, "Advertising"),
+    (7370, 7370, "Software (Internet)"),
+    (7372, 7372, "Software (System & Application)"),
+    (7374, 7374, "Information Services"),
+    (7371, 7379, "Computer Services"),
+    (7200, 7399, "Business & Consumer Services"),
+    (7800, 7999, "Entertainment"),
+    (8060, 8069, "Hospitals/Healthcare Facilities"),
+    (8000, 8099, "Healthcare Support Services"),
+    (8200, 8299, "Education"),
+    (8731, 8731, "Drugs (Biotechnology)"),
+    (8711, 8711, "Engineering/Construction"),
+    (8000, 8999, "Business & Consumer Services"),
+]
+
+
+def get_sic(cik):
+    """(SIC code as int, its description) from EDGAR, or (None, None)."""
+    data = fetch_json_or_none(EDGAR_SUBMISSIONS_URL.format(cik=cik))
+    try:
+        return int(data["sic"]), data.get("sicDescription") or ""
+    except (TypeError, KeyError, ValueError):
+        return None, None
+
+
+def suggest_industry(sic, biotech=False):
+    """First SIC_TO_DAMODARAN_INDUSTRY match for this code, or None. In
+    --biotech mode, any drug-manufacturing code suggests Biotechnology —
+    a clinical-stage company's risk looks like biotech's, not big pharma's,
+    whatever its SIC code says."""
+    if sic is None:
+        return None
+    if biotech and 2830 <= sic <= 2836:
+        return "Drugs (Biotechnology)"
+    for low, high, industry in SIC_TO_DAMODARAN_INDUSTRY:
+        if low <= sic <= high:
+            return industry
+    return None
+
+
+def load_industry_map():
+    """Saved per-ticker industry choices ({TICKER: {"industries": [[name,
+    weight], ...]}}), or {} if none yet."""
+    try:
+        with open(INDUSTRY_MAP_PATH) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_industry_choice(ticker, industries, sic):
+    """Remember this ticker's industry mix so every later run uses the
+    same beta without asking again. Kept in data/industry_map.json, which
+    is meant to be committed — it's a record of your judgment calls."""
+    saved = load_industry_map()
+    saved[ticker.upper()] = {"industries": industries, "sic": sic}
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(INDUSTRY_MAP_PATH, "w") as f:
+            json.dump(saved, f, indent=2, sort_keys=True)
+    except OSError:
+        print("  (Couldn't save the industry choice — it'll be asked again next run.)")
+
+
+def pick_one_industry(industries, prompt):
+    """Search Damodaran's industry list by name and pick one; returns the
+    exact industry name, or None if the user presses Enter to stop."""
+    while True:
+        query = input(prompt).strip().lower()
+        if not query:
+            return None
+        matches = [n for n in industries if query in n.lower()]
+        if not matches:
+            print("    No industry matches that — try a shorter word (e.g. chem, soft, retail).")
+            continue
+        for i, name in enumerate(matches, 1):
+            d = industries[name]
+            print(f"    {i:>2}. {name:<42} unlevered beta {d['unlevered_beta_cash']:.2f}  ({d['firms']} firms)")
+        pick = input("    Number (Enter to search again): ").strip()
+        if pick.isdigit() and 1 <= int(pick) <= len(matches):
+            return matches[int(pick) - 1]
+
+
+def choose_industries(ticker, sic, sic_description, industries, biotech=False):
+    """
+    Decide which Damodaran industry (or weighted mix, for a company in
+    several businesses) this company's beta comes from. Offers the saved
+    choice for this ticker if there is one, otherwise the SIC-based
+    suggestion; Enter accepts, a word searches, 'mix' builds a weighted
+    blend. Saves whatever is chosen. Returns [[name, weight], ...] or
+    None if no industry was chosen.
+    """
+    saved = load_industry_map().get(ticker.upper())
+    saved_mix = saved["industries"] if saved and all(n in industries for n, _ in saved["industries"]) else None
+    suggestion = suggest_industry(sic, biotech)
+    if sic is not None:
+        print(f"  SEC industry code: {sic} {sic_description}")
+    if saved_mix:
+        label = " + ".join(f"{n} ({w:.0%})" for n, w in saved_mix) if len(saved_mix) > 1 else saved_mix[0][0]
+        print(f"  Saved choice for {ticker.upper()}: {label}")
+        default = saved_mix
+    elif suggestion in industries:
+        print(f"  Suggested industry: {suggestion}")
+        default = [[suggestion, 1.0]]
+    else:
+        print("  No industry suggestion for this company's SEC code.")
+        default = None
+
+    answer = input("  Press Enter to use it, type part of a name to search (e.g. chem), or 'mix' for\n"
+                   "  a company in several businesses: " if default else
+                   "  Type part of an industry name to search (e.g. chem), or 'mix': ").strip()
+    if not answer and default:
+        chosen = default
+    elif answer.lower() == "mix":
+        chosen = []
+        print("  Add each business with its share of revenue. Enter a blank name when done.")
+        while True:
+            name = pick_one_industry(industries, "    Business industry (search word, Enter when done): ")
+            if name is None:
+                break
+            share = prompt_number(f"    Share of revenue for {name} (e.g. 60 for 60%): ")
+            chosen.append([name, share / 100])
+        chosen = [[n, w] for n, w in chosen if w > 0] or None
+    else:
+        matches = [n for n in industries if answer.lower() in n.lower()]
+        if len(matches) == 1:
+            chosen = [[matches[0], 1.0]]
+        else:
+            if matches:
+                for i, name in enumerate(matches, 1):
+                    d = industries[name]
+                    print(f"    {i:>2}. {name:<42} unlevered beta {d['unlevered_beta_cash']:.2f}  ({d['firms']} firms)")
+                pick = input("    Number (Enter to search again): ").strip()
+                if pick.isdigit() and 1 <= int(pick) <= len(matches):
+                    name = matches[int(pick) - 1]
+                else:
+                    name = pick_one_industry(industries, "  Search industry (Enter to skip): ")
+            else:
+                print("    No industry matches that.")
+                name = pick_one_industry(industries, "  Search industry (Enter to skip): ")
+            chosen = [[name, 1.0]] if name else None
+    if chosen:
+        save_industry_choice(ticker, chosen, sic)
+    return chosen
 
 
 def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, reit=False,
