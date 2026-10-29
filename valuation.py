@@ -198,6 +198,9 @@ METRIC_TAGS = {
     ],
     "rd_expense": [
         "ResearchAndDevelopmentExpense",  # shared tag name across us-gaap and ifrs-full
+        "ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost",  # e.g. Biogen switched to
+        # this tag in FY2021, which breaks out acquired in-process R&D (an M&A-driven, lumpy
+        # expense) separately — the old tag above just stops being filed and goes stale.
     ],
     "interest_expense": [
         "InterestExpense",
