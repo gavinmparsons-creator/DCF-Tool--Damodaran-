@@ -1223,6 +1223,130 @@ def patent_option_value(pv_commercial, development_cost, exclusivity_years, vola
 
 
 # ---------------------------------------------------------------------
+# REIT: a REIT must pay out at least 90% of taxable income, so its
+# dividend is close to its free cash flow to equity — the dividend
+# discount model above is the natural tool. Three REIT-specific fixes on
+# top of it, following Damodaran's treatment:
+#   1. Accounting depreciation on buildings overstates how fast real
+#      estate actually loses value, so net income understates cash
+#      earnings. FFO adds it back; AFFO then subtracts the capex needed
+#      to keep the buildings competitive.
+#   2. A REIT grows mostly by issuing new shares and debt, not by
+#      retaining earnings — so historical dividend growth overstates
+#      what EXISTING shareholders get. Growth should come from
+#      fundamentals: retention ratio x return on equity.
+#   3. Cross-check the cash-flow value against what the buildings are
+#      worth directly: net operating income / cap rate, less debt (NAV).
+# ---------------------------------------------------------------------
+
+def compute_ffo(net_income, real_estate_depreciation, gains_on_property_sales, real_estate_impairments=0.0):
+    """
+    Funds From Operations (Nareit definition):
+        FFO = net income + real estate depreciation & amortization
+              + impairments of real estate - gains on property sales
+
+    Gains are subtracted because selling a building is a one-off
+    liquidation of the asset base, not recurring operating earnings
+    (a LOSS on sale is passed in as a negative gain and so gets added
+    back). Impairments are added back for the same reason depreciation
+    is: a non-cash write-down of a building's book value.
+    """
+    return net_income + real_estate_depreciation + real_estate_impairments - gains_on_property_sales
+
+
+def compute_affo(ffo, maintenance_capex):
+    """
+    Adjusted FFO = FFO - recurring (maintenance) capex: roofs, HVAC,
+    tenant improvements and leasing commissions needed just to keep the
+    existing buildings leased. This is the closest thing a REIT has to
+    sustainable free cash flow to equity, and what a dividend should be
+    measured against — a dividend above AFFO is being funded by asset
+    sales, new debt or new shares, not by the buildings themselves.
+
+    Growth capex (new developments, acquisitions) is deliberately NOT
+    subtracted: that's reinvestment for growth, funded mostly by new
+    capital, not a cost of maintaining today's cash flow.
+    """
+    return ffo - maintenance_capex
+
+
+def reit_fundamental_growth(dividends, affo, book_equity):
+    """
+    Damodaran's fundamental growth check, on an AFFO basis:
+
+        retention ratio = 1 - dividends / AFFO
+        return on equity = AFFO / book equity
+        expected growth = retention ratio x return on equity
+
+    Uses AFFO rather than net income because a REIT's depreciation-
+    depressed net income routinely sits BELOW its dividend, which would
+    show a payout over 100% and a meaningless negative retention ratio
+    for a perfectly healthy REIT.
+
+    Growth CAN come out negative (dividend above AFFO): that's a real
+    signal — the dividend isn't covered by recurring cash flow — so
+    it's returned as-is, not floored at zero.
+
+    Returns a dict: payout_ratio, retention_ratio, roe, growth.
+    """
+    if affo <= 0:
+        raise ValueError("AFFO must be positive to compute fundamental growth")
+    if book_equity <= 0:
+        raise ValueError("book_equity must be positive to compute return on equity")
+    payout_ratio = dividends / affo
+    retention_ratio = 1.0 - payout_ratio
+    roe = affo / book_equity
+    return {
+        "payout_ratio": payout_ratio,
+        "retention_ratio": retention_ratio,
+        "roe": roe,
+        "growth": retention_ratio * roe,
+    }
+
+
+def reit_nav_per_share(noi, cap_rate, cash, total_debt, preferred_equity, shares_outstanding):
+    """
+    Net Asset Value: what the property portfolio is worth valued
+    directly, the way a buyer of the buildings would price it.
+
+        property value = NOI / cap rate
+        NAV = property value + cash - debt - preferred equity
+
+    A cap rate is the market's going yield on property: NOI / price.
+    It's (cost of capital - growth) in Gordon-growth form, so this is a
+    one-line DCF of the property cash flows, priced off what similar
+    buildings trade for rather than a WACC built up from CAPM.
+
+    Returns a dict: property_value, nav, nav_per_share.
+    """
+    if cap_rate <= 0:
+        raise ValueError("cap_rate must be positive")
+    if shares_outstanding <= 0:
+        raise ValueError("shares_outstanding must be positive")
+    property_value = noi / cap_rate
+    nav = property_value + cash - total_debt - preferred_equity
+    return {
+        "property_value": property_value,
+        "nav": nav,
+        "nav_per_share": nav / shares_outstanding,
+    }
+
+
+def share_count_growth_rate(share_counts):
+    """
+    Compound annual growth in shares outstanding, OLDEST FIRST. For a
+    REIT this is the dilution rate: how much of the headline dividend
+    and FFO growth is just the company getting bigger by issuing stock,
+    rather than each existing share getting more. Returns None with
+    fewer than 2 data points or a non-positive starting count.
+    """
+    if len(share_counts) < 2 or share_counts[0] <= 0:
+        return None
+    years = len(share_counts) - 1
+    return (share_counts[-1] / share_counts[0]) ** (1 / years) - 1
+
+
+# ---------------------------------------------------------------------
 # SELF-TEST: validate the math against a simple worked example.
 # Run this file directly (python3 model.py) to see it check itself.
 # ---------------------------------------------------------------------
@@ -1839,5 +1963,38 @@ if __name__ == "__main__":
     assert abs(option_with_delay_cost["dividend_yield"] - 0.10) < 1e-12, "Default dividend yield must be 1/t!"
     assert option_with_delay_cost["value"] < option_without["value"], \
         "Charging a cost of delay must lower the patent option's value!"
+
+    # compute_ffo / compute_affo: net income $100, depreciation $80,
+    # impairments $5, gains on sale $15 -> FFO = 100 + 80 + 5 - 15 = 170;
+    # maintenance capex $20 -> AFFO = 150.
+    ffo = compute_ffo(100, 80, 15, 5)
+    affo = compute_affo(ffo, 20)
+    print(f"FFO: {ffo}  (expected 170)   AFFO: {affo}  (expected 150)")
+    assert ffo == 170 and affo == 150, "FFO/AFFO mismatch!"
+    # A LOSS on sale (negative gain) must be added back, not subtracted.
+    assert compute_ffo(100, 80, -10) == 190, "A loss on property sales must increase FFO!"
+
+    # reit_fundamental_growth: dividends $120, AFFO $150, book equity $1,500
+    #   payout = 0.8, retention = 0.2, ROE = 0.10, growth = 0.02
+    reit_growth = reit_fundamental_growth(120, 150, 1500)
+    print(f"REIT fundamental growth: {reit_growth['growth']:.4f}  (expected 0.0200)")
+    assert abs(reit_growth["payout_ratio"] - 0.8) < 1e-12, "REIT payout ratio mismatch!"
+    assert abs(reit_growth["growth"] - 0.02) < 1e-12, "REIT fundamental growth mismatch!"
+    # A dividend above AFFO must show as NEGATIVE growth, not be floored.
+    assert reit_fundamental_growth(180, 150, 1500)["growth"] < 0, \
+        "A dividend above AFFO must produce negative fundamental growth!"
+
+    # reit_nav_per_share: NOI $60, cap rate 6% -> property value $1,000;
+    # + cash $50 - debt $400 - preferred $50 = NAV $600; / 100 shares = $6.
+    nav = reit_nav_per_share(60, 0.06, 50, 400, 50, 100)
+    print(f"REIT NAV per share: {nav['nav_per_share']:.4f}  (expected 6.0000)")
+    assert abs(nav["property_value"] - 1000) < 1e-9, "REIT property value mismatch!"
+    assert abs(nav["nav_per_share"] - 6.0) < 1e-9, "REIT NAV per share mismatch!"
+
+    # share_count_growth_rate: 100 -> 121 over 2 years = 10%/yr.
+    dilution = share_count_growth_rate([100, 110, 121])
+    print(f"Share count growth: {dilution:.4f}  (expected 0.1000)")
+    assert abs(dilution - 0.10) < 1e-12, "Share count growth mismatch!"
+    assert share_count_growth_rate([100]) is None, "One data point must return None!"
 
     print("\n✓ All self-tests passed. The math is internally consistent.")
