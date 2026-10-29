@@ -1389,6 +1389,7 @@ SIC_TO_DAMODARAN_INDUSTRY = [
     (2830, 2835, "Drugs (Pharmaceutical)"),
     (2840, 2844, "Household Products"),
     (2800, 2829, "Chemical (Basic)"),
+    (2860, 2869, "Chemical (Basic)"),  # industrial organics: commodity petrochemicals (Lyondell, Westlake)
     (2850, 2899, "Chemical (Specialty)"),
     (2900, 2999, "Oil/Gas (Integrated)"),
     (3000, 3099, "Rubber& Tires"),
@@ -1866,34 +1867,95 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
 
     market_cap = share_price * shares_out
 
-    # ---- Bottom-up beta: unlever the raw beta at this company's own current
-    # leverage, then relever it — this is a no-op unless you override with an
-    # industry-average unlevered beta below, but it exposes the mechanics so
-    # you can see how much leverage is driving the raw beta. ----
+    # ---- Bottom-up beta (Damodaran): a single company's regression beta
+    # has a standard error of ~0.2-0.3 (Lyondell's came out 0.35), so the
+    # default is the INDUSTRY's unlevered beta — averaged across dozens or
+    # hundreds of firms, which cancels most of that noise — relevered to
+    # THIS company's market D/E at the marginal tax rate. Uses the
+    # cash-corrected unlevered beta (the business's own risk), since the
+    # DCF adds cash back separately. The regression beta stays on screen
+    # for comparison, and any number can still be typed in. ----
     debt_to_equity = total_debt / market_cap if market_cap else 0
-    unlevered_beta = model.unlever_beta(beta, effective_tax_rate, debt_to_equity)
+    regression_beta = beta
+    damodaran = load_damodaran_data()
 
     print(f"\n{'='*60}")
-    print("  Beta check (bottom-up)")
+    print("  Beta (bottom-up, Damodaran industry average)")
     print(f"{'='*60}")
-    print(f"  Raw beta (as entered/pulled):     {beta:.2f}")
-    print(f"  Company's D/E (debt/market cap):  {debt_to_equity:.2f}")
-    print(f"  Implied UNLEVERED (asset) beta:   {unlevered_beta:.2f}")
-    print("  (This strips out the effect of this company's own leverage.")
-    print("   For a more reliable beta, look up 2-3 direct competitors,")
-    print("   unlever each the same way, average them, then relever that")
-    print("   average to THIS company's D/E above — a raw single-company")
-    print("   regression beta is noisy, especially for small/thin-traded stocks.)")
-    override = input("  Press Enter to use the raw beta as-is, or type an\n"
-                      "  industry-average UNLEVERED beta to relever instead: ").strip()
-    if override:
-        industry_unlevered_beta = parse_number(override)
-        beta = model.relever_beta(industry_unlevered_beta, effective_tax_rate, debt_to_equity)
-        print(f"  Using relevered beta: {beta:.2f}")
+    print(f"  Regression beta (from market data): {regression_beta:.2f}  — one company's, noisy")
+    print(f"  Company's D/E (debt/market cap):    {debt_to_equity:.2f}")
+    beta_source = "regression beta (as pulled)"
+    industry_beta = None
+    if damodaran["betas"]:
+        industries = damodaran["betas"]["industries"]
+        if fx_currency:
+            print("  Note: this is a foreign filer — these are Damodaran's US industry betas;")
+            print("  his regional tables can be used by typing an unlevered beta below.")
+        sic, sic_description = get_sic(cik)
+        mix = choose_industries(ticker, sic, sic_description, industries, biotech)
+        if mix:
+            unlevered = model.weighted_unlevered_beta(
+                [(industries[name]["unlevered_beta_cash"], weight) for name, weight in mix])
+            industry_beta = model.relever_beta(unlevered, DEFAULT_MARGINAL_TAX_RATE, debt_to_equity)
+            for name, weight in mix:
+                d = industries[name]
+                print(f"    {name:<42} unlevered {d['unlevered_beta_cash']:.2f}  ({d['firms']} firms)"
+                      + (f"  x {weight:.0%}" if len(mix) > 1 else ""))
+            print(f"  Unlevered beta: {unlevered:.2f}  -> relevered at D/E {debt_to_equity:.2f}, "
+                  f"{DEFAULT_MARGINAL_TAX_RATE:.0%} marginal tax: {industry_beta:.2f}")
+            print(f"  (Damodaran's US industry betas, updated {damodaran['betas']['updated']})")
+            industry_label = " + ".join(name for name, _ in mix)
+    else:
+        print("  Damodaran's industry betas couldn't be loaded (no connection and no cache).")
+
+    if industry_beta is not None:
+        answer = input(f"  Press Enter to use the industry beta {industry_beta:.2f}, type r for the regression\n"
+                       "  beta, or type an UNLEVERED beta to relever instead: ").strip().lower()
+    else:
+        answer = input("  Press Enter to use the regression beta, or type an UNLEVERED beta to\n"
+                       "  relever instead: ").strip().lower()
+    if answer == "r" or (not answer and industry_beta is None):
+        beta = regression_beta
+    elif not answer:
+        beta = industry_beta
+        beta_source = f"industry: {industry_label}, unlevered {unlevered:.2f}, relevered"
+    else:
+        try:
+            typed_unlevered = parse_number(answer)
+            beta = model.relever_beta(typed_unlevered, DEFAULT_MARGINAL_TAX_RATE, debt_to_equity)
+            beta_source = f"typed unlevered {typed_unlevered:.2f}, relevered"
+        except ValueError:
+            print("  Couldn't read that — using the " +
+                  ("industry beta." if industry_beta is not None else "regression beta."))
+            beta = industry_beta if industry_beta is not None else regression_beta
+            if industry_beta is not None:
+                beta_source = f"industry: {industry_label}, unlevered {unlevered:.2f}, relevered"
+    print(f"  Using beta: {beta:.2f}")
+
+    # ---- Equity risk premium: Damodaran's current implied ERP (what the
+    # S&P 500's price implies investors expect over the risk-free rate,
+    # updated monthly) rather than a fixed long-run number. ----
+    print(f"\n{'='*60}")
+    print("  Equity risk premium")
+    print(f"{'='*60}")
+    if damodaran["erp"]:
+        default_erp = damodaran["erp"]["erp"]
+        erp_source = f"Damodaran implied ERP, {damodaran['erp']['as_of']}"
+        print(f"  Damodaran's implied ERP on {damodaran['erp']['as_of']}: {default_erp:.2%}")
+        print(f"  (He estimates it against the 10-year Treasury yield; this run's risk-free rate is")
+        print(f"  {DEFAULT_RISK_FREE_RATE:.2%} — keep the two consistent.)")
+    else:
+        default_erp = DEFAULT_EQUITY_RISK_PREMIUM
+        erp_source = "fallback default (Damodaran's ERP couldn't be loaded)"
+        print(f"  Damodaran's current ERP couldn't be loaded — falling back to {default_erp:.2%}.")
+    erp = prompt_number(f"  Press Enter to use {default_erp:.2%}, or type an ERP as a percent (e.g. 5 for 5%): ",
+                        default=default_erp * 100) / 100
+    if abs(erp - default_erp) > 1e-12:
+        erp_source = "typed"
 
     # Computed here (rather than down with WACC) because the dividend
     # discount model below needs cost of equity too, before WACC exists.
-    coe = model.cost_of_equity(DEFAULT_RISK_FREE_RATE, beta, DEFAULT_EQUITY_RISK_PREMIUM)
+    coe = model.cost_of_equity(DEFAULT_RISK_FREE_RATE, beta, erp)
 
     # ---- Reinvestment-rate-derived growth (Damodaran fundamental growth) ----
     # NOTE: change in net working capital defaults to 0 here, same simplification
@@ -2238,7 +2300,8 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     print("  Assumptions used")
     print(f"{'='*60}")
     print(f"  Effective tax rate:        {effective_tax_rate:.2%}")
-    print(f"  Beta:                      {beta:.2f}")
+    print(f"  Beta:                      {beta:.2f}  ({beta_source})")
+    print(f"  Equity risk premium:       {erp:.2%}  ({erp_source})")
     print(f"  Cost of equity (CAPM):     {coe:.2%}")
     print(f"  WACC (discount rate):      {discount_rate:.2%}")
     print(f"  Market cap:                ${market_cap:,.0f}")
