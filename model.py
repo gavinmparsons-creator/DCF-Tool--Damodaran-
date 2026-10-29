@@ -62,6 +62,23 @@ def relever_beta(unlevered_beta, tax_rate, debt_to_equity):
     return unlevered_beta * (1 + (1 - tax_rate) * debt_to_equity)
 
 
+def weighted_unlevered_beta(betas_and_weights):
+    """
+    Damodaran's bottom-up beta for a company in more than one business:
+    the average of each business's industry unlevered beta, weighted by
+    how much of the company each business is (revenue share is the usual
+    proxy; operating income or estimated value are better when known).
+
+    betas_and_weights: list of (unlevered_beta, weight) pairs. Weights
+    don't need to sum to 1 — they're normalized here, so revenue in
+    dollars or percentages both work.
+    """
+    total_weight = sum(w for _, w in betas_and_weights)
+    if not betas_and_weights or total_weight <= 0:
+        raise ValueError("need at least one business with a positive weight")
+    return sum(b * w for b, w in betas_and_weights) / total_weight
+
+
 def compute_reinvestment_rate(capex, d_and_a, change_in_nwc, nopat):
     """
     Reinvestment rate = (CapEx - D&A + change in NWC) / NOPAT
@@ -2064,5 +2081,16 @@ if __name__ == "__main__":
     assert even["n_years"] == 3 and even["margins"][3] is None, "Zero-revenue year must be skipped!"
     assert abs(cycle_margin_stats([10, 30], [100, 100])["median"] - 0.20) < 1e-12, \
         "Even-count median must average the middle two margins!"
+
+    # weighted_unlevered_beta: 60% in a 0.64 business, 40% in a 0.82 one
+    #   = 0.6*0.64 + 0.4*0.82 = 0.384 + 0.328 = 0.712; weights in dollars
+    #   (600, 400) must give the same answer, since they're normalized.
+    mixed_beta = weighted_unlevered_beta([(0.64, 0.6), (0.82, 0.4)])
+    print(f"Weighted unlevered beta: {mixed_beta:.4f}  (expected 0.7120)")
+    assert abs(mixed_beta - 0.712) < 1e-12, "Weighted unlevered beta mismatch!"
+    assert abs(weighted_unlevered_beta([(0.64, 600), (0.82, 400)]) - 0.712) < 1e-12, \
+        "Weights must be normalized, so dollar weights give the same beta!"
+    # Relevering the industry beta: 0.64 at D/E 0.5, 25% tax = 0.64*(1+0.75*0.5) = 0.88.
+    assert abs(relever_beta(0.64, 0.25, 0.5) - 0.88) < 1e-12, "Relevered beta mismatch!"
 
     print("\n✓ All self-tests passed. The math is internally consistent.")
