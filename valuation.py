@@ -677,6 +677,62 @@ def freshest_annual_value(facts_json, tag_candidates):
     return best
 
 
+# Tags for a company's TOTAL debt, checked only when the usual current /
+# long-term pair has gone stale. A stale debt tag means one of two very
+# different things: the company RENAMED its debt tag (Realty Income: a
+# FY2016 LongTermDebt of $4.0B, while it now reports $25B as
+# NotesPayable) or it REPAID the debt and stopped reporting any (Viking:
+# convertible notes last tagged FY2016-2018, repaid in 2019). A current
+# figure under any of these tags means "renamed"; none at all means
+# "repaid".
+TOTAL_DEBT_TAGS = [
+    "LongTermDebt",
+    "DebtLongtermAndShorttermCombinedAmount",
+    "LongTermDebtNoncurrent",
+    "NotesPayable",
+    "ConvertibleNotesPayable",
+    "SeniorNotes",
+]
+
+
+def resolve_total_debt(financials, facts_json, stale, fx_currency, fx_rate):
+    """
+    Total debt for the equity bridge. When neither the current nor the
+    long-term debt figure is stale, this is just their sum (each
+    defaulting to $0 if missing — plenty of companies have no current
+    portion, or no debt at all). When either is stale, see
+    TOTAL_DEBT_TAGS above: use a current total-debt figure if the filer
+    reports one under another tag, otherwise treat the stale amount as
+    repaid. Either way the user gets the final say.
+    """
+    debt_keys = {"total_debt_current": "current portion of debt", "total_debt_noncurrent": "long-term debt"}
+    stale_keys = [k for k in debt_keys if k in stale]
+    if not stale_keys:
+        return sum(get_metric_value(financials, k, label, stale, default=0.0) for k, label in debt_keys.items())
+
+    latest_fy = max(info["fiscal_year"] for info in financials.values() if info["fiscal_year"] is not None)
+    stale_total = sum(financials[k]["value"] for k in stale_keys)
+    print(f"\n  Debt: {', '.join(stale_keys)} last reported FY"
+          f"{min(financials[k]['fiscal_year'] for k in stale_keys)} (${stale_total:,.0f}) — stale.")
+    val, tag, fy, unit = freshest_annual_value(facts_json, TOTAL_DEBT_TAGS)
+    if val is not None and fy is not None and fy >= latest_fy:
+        if fx_currency and unit == fx_currency:
+            val *= fx_rate
+        print(f"  The company now reports total debt under a different tag: ${val:,.0f} "
+              f"(tag: {tag}, FY{fy}).")
+        default = val
+    else:
+        fresh_parts = sum(get_metric_value(financials, k, label, stale, default=0.0)
+                          for k, label in debt_keys.items() if k not in stale_keys)
+        print("  No debt tag is reported for the latest year, which usually means the debt was")
+        print("  repaid. Treating the stale amount as $0" +
+              (f" (keeping the current ${fresh_parts:,.0f})." if fresh_parts else "."))
+        default = fresh_parts
+    print("  Check the latest 10-K balance sheet if unsure.")
+    return prompt_number(f"  Press Enter to use ${default:,.0f} as total debt, or type a corrected amount: ",
+                         default=default)
+
+
 def reit_metric(facts_json, label, tag_candidates, latest_fy, fx_currency, fx_rate, default, per_share=False):
     """
     Pull one REIT-specific figure (freshest tag wins), show where it came
@@ -1234,8 +1290,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         print(f"  Folding in R&D: D&A +${rd_result['amortization']:,.0f} (R&D amortization), "
               f"CapEx +${rd_result['current_rd']:,.0f} (current R&D as investment).")
 
-    debt_current = get_metric_value(financials, "total_debt_current", "current portion of debt", stale)
-    debt_noncurrent = get_metric_value(financials, "total_debt_noncurrent", "long-term debt", stale)
+    total_debt = resolve_total_debt(financials, facts, stale, fx_currency, fx_rate)
     cash = get_metric_value(financials, "cash", "cash and equivalents", stale)
     sti_val, sti_tag, sti_fy, sti_unit = freshest_annual_value(facts, SHORT_TERM_INVESTMENT_TAGS)
     cash_fy = financials["cash"]["fiscal_year"]
@@ -1247,7 +1302,6 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         cash += sti_val
     shares_out = get_metric_value(financials, "shares_outstanding", "shares outstanding", stale)
 
-    total_debt = debt_current + debt_noncurrent
     book_equity = get_metric_value(financials, "book_equity", "total stockholders' equity (book value)", stale)
 
     latest_tax_rate = tax_expense / pretax_income if pretax_income else None
