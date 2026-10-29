@@ -1295,6 +1295,28 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
             print("  GAAP-profitable, so there's no margin to normalize. Keeping the negative")
             print("  latest-FY EBIT; the FCFF-based DCF below will likely still break (see the")
             print("  negative-FCFF warning) — the EV/Revenue fallback is the better tool here.")
+    elif revenue:
+        # A cyclical trough doesn't always go negative: Olin's latest EBIT
+        # was +$5.3M on a 0.1% margin, vs a double-digit average. Left as
+        # is, that near-zero EBIT values the business as if the trough were
+        # permanent and drives interest coverage to ~0x — a "D" rating and
+        # a 19.5% cost of debt. Offer the same normalization as the
+        # negative case when the margin is under half its trailing average.
+        normalized_ebit, margin, margin_years, margin_n = trailing_normalized_ebit(facts, revenue)
+        if normalized_ebit is not None and ebit / revenue < 0.5 * margin:
+            print(f"\n{'='*60}")
+            print("  EBIT normalization (latest FY looks like a cyclical trough)")
+            print(f"{'='*60}")
+            print(f"  Latest FY EBIT: ${ebit:,.0f}  (margin {ebit / revenue:.1%})")
+            print(f"  Normalized:     ${normalized_ebit:,.0f}  ({margin:.1%} margin, averaged over "
+                  f"{margin_n} profitable year(s), {margin_years}, applied to current revenue)")
+            print("  The latest margin is under half the trailing average. For a cyclical in a")
+            print("  trough, the normalized figure is the better base; for a business in")
+            print("  structural decline, keep the latest figure.")
+            keep = input("  Press Enter to use the normalized EBIT, or type k to keep the latest: ").strip().lower()
+            if keep != "k":
+                ebit = normalized_ebit
+                print("  Using the normalized figure below (including for the credit rating).")
 
     pretax_income = get_metric_value(financials, "pretax_income", "pretax income", stale)
     tax_expense = get_metric_value(financials, "income_tax_expense", "income tax expense", stale)
