@@ -595,6 +595,36 @@ def trailing_revenue_cagr(facts_json, years=5):
     return cagr, f"FY{oldest['fiscal_year']}-FY{newest['fiscal_year']}"
 
 
+# Interest-expense tags that hold a plain positive expense magnitude —
+# the signed net-interest tags are left out, since a net figure can't be
+# turned back into gross expense (see NET_INTEREST_TAGS).
+GROSS_INTEREST_EXPENSE_TAGS = [t for t in METRIC_TAGS["interest_expense"] if t not in NET_INTEREST_TAGS]
+
+
+def pretax_plus_interest_series(facts_json, years=5):
+    """
+    EBIT rebuilt as pretax income + interest expense, year by year, for
+    filers whose income statement has no operating-income line at all
+    (Dow goes straight from costs to pretax income, so OperatingIncomeLoss
+    is never tagged). Only years with both figures are kept. It's an
+    approximation: anything else between operating income and pretax
+    income (equity-method earnings, other non-operating gains) stays in.
+    Returns entries shaped like get_annual_series's (val, end,
+    fiscal_year, unit), oldest first.
+    """
+    pretax = get_annual_series(facts_json, METRIC_TAGS["pretax_income"], years)
+    _val, interest_tag, _fy, _unit = freshest_annual_value(facts_json, GROSS_INTEREST_EXPENSE_TAGS)
+    if not pretax or interest_tag is None:
+        return []
+    interest_by_end = {e["end"]: e for e in get_annual_series(facts_json, [interest_tag], years)}
+    series = []
+    for p in pretax:
+        i = interest_by_end.get(p["end"])
+        if i is not None and i["val"] >= 0:
+            series.append({**p, "val": p["val"] + i["val"]})
+    return series
+
+
 def trailing_normalized_ebit(facts_json, current_revenue, years=5):
     """
     When the latest fiscal year's EBIT is negative, the single-year FCFF
@@ -618,6 +648,8 @@ def trailing_normalized_ebit(facts_json, current_revenue, years=5):
     session); the EV/Revenue fallback is the only option for those.
     """
     ebit_series = get_annual_series(facts_json, METRIC_TAGS["operating_income"], years)
+    if not ebit_series:
+        ebit_series = pretax_plus_interest_series(facts_json, years)
     revenue_series = get_annual_series(facts_json, METRIC_TAGS["revenue"], years)
     revenue_by_end = {e["end"]: e for e in revenue_series}
 
@@ -1175,7 +1207,18 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
 
     # ---- Assemble DCF inputs ----
     revenue = get_metric_value(financials, "revenue", "revenue", stale)
-    ebit = get_metric_value(financials, "operating_income", "EBIT / operating income", stale)
+    rebuilt = pretax_plus_interest_series(facts, years=1)
+    if financials["operating_income"]["value"] is None and rebuilt:
+        latest_rebuilt = rebuilt[-1]
+        if fx_currency and latest_rebuilt["unit"] == fx_currency:
+            latest_rebuilt = {**latest_rebuilt, "val": latest_rebuilt["val"] * fx_rate}
+        print("  'EBIT / operating income' isn't tagged — this company's income statement has no")
+        print(f"  operating-income line. Rebuilt as pretax income + interest expense (FY"
+              f"{latest_rebuilt['fiscal_year']}): ${latest_rebuilt['val']:,.0f}")
+        ebit = prompt_number("  Press Enter to use it, or type a corrected EBIT (in dollars): ",
+                             default=latest_rebuilt["val"])
+    else:
+        ebit = get_metric_value(financials, "operating_income", "EBIT / operating income", stale)
 
     # ---- R&D capitalization (Damodaran-style) ----
     # Accounting expenses R&D as incurred, but for an R&D-driven business
