@@ -7,6 +7,7 @@ USAGE (from Terminal):
     python3 valuation.py MSFT --fmp-key YOUR_FMP_KEY_HERE
     python3 valuation.py VKTX --biotech --narrative   (drug pipeline rNPV + biotech defaults)
     python3 valuation.py O --reit                     (FFO/AFFO dividend model + NAV)
+    python3 valuation.py DOW --cyclical --narrative   (normalize to the 10-yr cycle margin)
 
 WHAT IT DOES:
     1. Looks up the company's CIK number from its ticker (via SEC EDGAR)
@@ -652,49 +653,84 @@ def pretax_plus_interest_series(facts_json, years=5):
     return series
 
 
-def trailing_normalized_ebit(facts_json, current_revenue, years=5):
+def cycle_margin_history(facts_json, years=10):
     """
-    When the latest fiscal year's EBIT is negative, the single-year FCFF
-    DCF breaks (see the negative-FCFF warning in run_full_valuation) —
-    whether from genuine distress or a cyclical trough. One fix would be
-    reverting to the last year EBIT was positive, but that reuses a
-    stale absolute dollar figure: if revenue has grown (or shrunk) since
-    then, that old EBIT no longer reflects the business at its current
-    scale. Instead, this averages the EBIT MARGIN (EBIT/revenue) over
-    trailing years where EBIT was positive, then applies that margin to
-    CURRENT revenue — smoothing past the bad year while keeping the
-    dollar scale current.
+    Up to `years` of matched (revenue, EBIT) pairs, one per fiscal year,
+    oldest first — the raw material for normalizing a cyclical's margin
+    over a full cycle (see model.cycle_margin_stats). Loss years are
+    KEPT: troughs are part of the cycle, and the old approach of
+    averaging only profitable years pushed the "normal" margin up.
 
-    Only positive-EBIT years count toward the average (the margin
-    equivalent of "the last year that showed a positive growth rate").
-
-    Returns (normalized_ebit, margin, year_range_str, n_years_used), or
-    (None, None, None, 0) if no trailing year had positive EBIT at all —
-    true for companies that have never been GAAP-profitable (Zscaler,
-    Snowflake, Cloudflare, Datadog, Samsara all fall in this bucket this
-    session); the EV/Revenue fallback is the only option for those.
+    EBIT comes from operating income; for years where that isn't tagged
+    (Dow has no operating-income line at all), it's filled in with
+    pretax income + interest expense and the row is marked `rebuilt`.
+    Revenue and EBIT are matched on the same period end and must be in
+    the same currency (a margin is a ratio, so no FX conversion is
+    needed). Returns a list of dicts: fiscal_year, revenue, ebit, rebuilt.
     """
-    ebit_series = get_annual_series(facts_json, METRIC_TAGS["operating_income"], years)
-    if not ebit_series:
-        ebit_series = pretax_plus_interest_series(facts_json, years)
-    revenue_series = get_annual_series(facts_json, METRIC_TAGS["revenue"], years)
-    revenue_by_end = {e["end"]: e for e in revenue_series}
-
-    margins, fiscal_years = [], []
-    for ebit_entry in ebit_series:
-        if ebit_entry["val"] <= 0:
+    pull = years + 5  # extra headroom: not every year has both figures
+    revenue = {e["end"]: e for e in get_annual_series(facts_json, METRIC_TAGS["revenue"], pull)}
+    operating = {e["end"]: e for e in get_annual_series(facts_json, METRIC_TAGS["operating_income"], pull)}
+    ebit = {e["end"]: e for e in pretax_plus_interest_series(facts_json, pull)}
+    ebit.update(operating)
+    rows = []
+    for end in sorted(set(revenue) & set(ebit)):
+        r, e = revenue[end], ebit[end]
+        if r["unit"] != e["unit"]:
             continue
-        revenue_entry = revenue_by_end.get(ebit_entry["end"])
-        if revenue_entry is None or revenue_entry["val"] == 0:
-            continue
-        margins.append(ebit_entry["val"] / revenue_entry["val"])
-        fiscal_years.append(ebit_entry["fiscal_year"])
+        rows.append({"fiscal_year": r["fiscal_year"], "revenue": r["val"], "ebit": e["val"],
+                     "rebuilt": end not in operating})
+    return rows[-years:]
 
-    if not margins:
-        return None, None, None, 0
-    avg_margin = sum(margins) / len(margins)
-    year_range = f"FY{min(fiscal_years)}-FY{max(fiscal_years)}" if len(fiscal_years) > 1 else f"FY{fiscal_years[0]}"
-    return avg_margin * current_revenue, avg_margin, year_range, len(margins)
+
+def cycle_stats_or_none(rows):
+    """model.cycle_margin_stats over history rows, or None when there's
+    too little usable history (under 2 years with positive revenue)."""
+    if len([r for r in rows if r["revenue"] > 0]) < 2:
+        return None
+    return model.cycle_margin_stats([r["ebit"] for r in rows], [r["revenue"] for r in rows])
+
+
+def choose_cycle_margin(rows):
+    """
+    Interactive: print the year-by-year margin table for `rows` (from
+    cycle_margin_history), let the user trim the window (spin-offs and
+    big mergers make older years a different company — Dow before its
+    2019 separation from DowDuPont, say), then pick which average to
+    use. Returns a dict: margin, method, n_years, span — or None if
+    there's too little history to average.
+    """
+    print(f"\n  {'Year':<6} {'Revenue':>18} {'EBIT':>18} {'Margin':>8}")
+    for r in rows:
+        margin = f"{r['ebit'] / r['revenue']:>7.1%}" if r["revenue"] > 0 else f"{'n/a':>7}"
+        print(f"  FY{r['fiscal_year']:<4} {r['revenue']:>18,.0f} {r['ebit']:>18,.0f} {margin}"
+              + ("  *" if r["rebuilt"] else ""))
+    if any(r["rebuilt"] for r in rows):
+        print("  * no operating income tagged that year — EBIT rebuilt as pretax income + interest")
+
+    window = len(rows)
+    while True:
+        window_input = prompt_number(f"  Years to average, most recent first (Enter for all {len(rows)}): ",
+                                     default=len(rows))
+        if 2 <= window_input <= len(rows) and window_input == int(window_input):
+            window = int(window_input)
+            break
+        print(f"    Please enter a whole number from 2 to {len(rows)}.")
+    subset = rows[-window:]
+    stats = cycle_stats_or_none(subset)
+    if stats is None:
+        print("  Not enough years with revenue in that window to average.")
+        return None
+    span = f"FY{subset[0]['fiscal_year']}-FY{subset[-1]['fiscal_year']}"
+    print(f"  {span} ({stats['n_years']} yrs):  mean {stats['mean']:.1%}   "
+          f"aggregate {stats['aggregate']:.1%}   median {stats['median']:.1%}")
+    print("  mean = each year counts equally (Damodaran's usual cycle average); aggregate =")
+    print("  total EBIT / total revenue, so big-revenue years count more; median = guards")
+    print("  against one freak year.")
+    methods = {"m": "mean", "a": "aggregate", "d": "median"}
+    choice = input("  Use which? (m = mean, a = aggregate, d = median; Enter for mean): ").strip().lower()
+    method = methods.get(choice, "mean")
+    return {"margin": stats[method], "method": method, "n_years": stats["n_years"], "span": span}
 
 
 def trailing_dividend_growth_rate(facts_json, years=6):
@@ -703,7 +739,7 @@ def trailing_dividend_growth_rate(facts_json, years=6):
     window. This is the standard Gordon Growth Model input for a
     capital-intensive, dividend-paying business (utilities, REITs) where
     nearly all earnings get reinvested into a growing rate base rather
-    than showing up as discretionary FCFF — see trailing_normalized_ebit
+    than showing up as discretionary FCFF — see cycle_margin_history
     and the DDM functions in model.py for why a dividend discount model
     is the right tool for that profile instead of an FCFF-based DCF.
 
@@ -1177,7 +1213,8 @@ def print_financials_report(company_name, financials):
     return missing, stale
 
 
-def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, reit=False):
+def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, reit=False,
+                       cyclical=False):
     cik, company_name = get_cik_for_ticker(ticker)
     print(f"Found CIK {cik} for {company_name}")
 
@@ -1304,46 +1341,60 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         ebit += rd_result["ebit_adjustment"]
         print(f"  EBIT after R&D capitalization:              ${ebit:,.0f}")
 
-    if ebit < 0:
-        latest_ebit = ebit
-        normalized_ebit, margin, margin_years, margin_n = trailing_normalized_ebit(facts, revenue)
+    # ---- Cycle normalization (Damodaran-style): a cyclical's latest
+    # year mostly says where the cycle is, not what the business earns.
+    # Value it on its average margin over a full cycle (up to 10 years,
+    # loss years included — see cycle_margin_history) applied to current
+    # revenue. Runs when EBIT is negative; when it's positive but under
+    # half the cycle average (Olin: +$5.3M on a 0.1% margin vs ~10%, which
+    # otherwise gives ~0x interest coverage, a "D" rating and a 19.5%
+    # cost of debt); or always with --cyclical. Historical margins are
+    # as reported, so the current year's R&D-capitalization adjustment
+    # is compared out and added back on top of the normalized figure. ----
+    rd_ebit_adjustment = rd_result["ebit_adjustment"] if rd_result else 0.0
+    cycle_rows = cycle_margin_history(facts) if revenue else []
+    full_cycle = cycle_stats_or_none(cycle_rows)
+    reported_margin = (ebit - rd_ebit_adjustment) / revenue if revenue else None
+    is_trough = (full_cycle is not None and reported_margin is not None and full_cycle["mean"] > 0
+                 and reported_margin < 0.5 * full_cycle["mean"])
+    cycle_choice = None
+    if ebit < 0 or is_trough or (cyclical and full_cycle is not None):
+        reason = ("latest FY is negative" if ebit < 0 else
+                  "latest FY looks like a cyclical trough" if is_trough else "--cyclical")
         print(f"\n{'='*60}")
-        print("  EBIT normalization (latest FY is negative)")
+        print(f"  EBIT normalization over the cycle ({reason})")
         print(f"{'='*60}")
-        print(f"  Latest FY EBIT: ${latest_ebit:,.0f}" +
-              (f"  (margin {latest_ebit / revenue:.1%})" if revenue else "  (no revenue yet)"))
-        if normalized_ebit is not None:
-            print(f"  Normalized:     ${normalized_ebit:,.0f}  ({margin:.1%} margin, averaged over "
-                  f"{margin_n} profitable year(s), {margin_years}, applied to current revenue)")
-            print("  Using the normalized figure below instead of the negative latest-FY EBIT.")
-            ebit = normalized_ebit
+        print(f"  Latest FY EBIT: ${ebit:,.0f}" +
+              (f"  (margin {ebit / revenue:.1%})" if revenue else "  (no revenue yet)"))
+        if full_cycle is None:
+            print("  Not enough revenue/EBIT history to average a margin over — keeping the")
+            print("  latest-FY EBIT; if it's negative the FCFF-based DCF below will likely still")
+            print("  break (see the negative-FCFF warning) — the EV/Revenue fallback is the")
+            print("  better tool here.")
         else:
-            print("  No trailing year had positive EBIT at all — this company has never been")
-            print("  GAAP-profitable, so there's no margin to normalize. Keeping the negative")
-            print("  latest-FY EBIT; the FCFF-based DCF below will likely still break (see the")
-            print("  negative-FCFF warning) — the EV/Revenue fallback is the better tool here.")
-    elif revenue:
-        # A cyclical trough doesn't always go negative: Olin's latest EBIT
-        # was +$5.3M on a 0.1% margin, vs a double-digit average. Left as
-        # is, that near-zero EBIT values the business as if the trough were
-        # permanent and drives interest coverage to ~0x — a "D" rating and
-        # a 19.5% cost of debt. Offer the same normalization as the
-        # negative case when the margin is under half its trailing average.
-        normalized_ebit, margin, margin_years, margin_n = trailing_normalized_ebit(facts, revenue)
-        if normalized_ebit is not None and ebit / revenue < 0.5 * margin:
-            print(f"\n{'='*60}")
-            print("  EBIT normalization (latest FY looks like a cyclical trough)")
-            print(f"{'='*60}")
-            print(f"  Latest FY EBIT: ${ebit:,.0f}  (margin {ebit / revenue:.1%})")
-            print(f"  Normalized:     ${normalized_ebit:,.0f}  ({margin:.1%} margin, averaged over "
-                  f"{margin_n} profitable year(s), {margin_years}, applied to current revenue)")
-            print("  The latest margin is under half the trailing average. For a cyclical in a")
-            print("  trough, the normalized figure is the better base; for a business in")
-            print("  structural decline, keep the latest figure.")
-            keep = input("  Press Enter to use the normalized EBIT, or type k to keep the latest: ").strip().lower()
-            if keep != "k":
-                ebit = normalized_ebit
-                print("  Using the normalized figure below (including for the credit rating).")
+            if is_trough:
+                print(f"  That's under half the {full_cycle['n_years']}-year average margin "
+                      f"({full_cycle['mean']:.1%}).")
+            cycle_choice = choose_cycle_margin(cycle_rows)
+            if cycle_choice is not None and cycle_choice["margin"] <= 0:
+                print(f"  The {cycle_choice['method']} margin over {cycle_choice['span']} is a loss "
+                      f"({cycle_choice['margin']:.1%}) — there's no")
+                print("  profitable 'normal' to revert to, so keeping the latest-FY EBIT. If it's")
+                print("  negative, the EV/Revenue fallback below is the better tool.")
+                cycle_choice = None
+            elif cycle_choice is not None:
+                normalized_ebit = cycle_choice["margin"] * revenue + rd_ebit_adjustment
+                print(f"  Normalized EBIT: ${normalized_ebit:,.0f}  ({cycle_choice['margin']:.1%} "
+                      f"{cycle_choice['method']} margin, {cycle_choice['span']}, x current revenue"
+                      + (f", + R&D adjustment {rd_ebit_adjustment:+,.0f}" if rd_ebit_adjustment else "") + ")")
+                print("  For a cyclical, the normalized figure is the better base; for a business in")
+                print("  structural decline, keep the latest figure.")
+                keep = input("  Press Enter to use the normalized EBIT, or type k to keep the latest: ").strip().lower()
+                if keep != "k":
+                    ebit = normalized_ebit
+                    print("  Using the normalized figure below (including for the credit rating).")
+                else:
+                    cycle_choice = None
 
     pretax_income = get_metric_value(financials, "pretax_income", "pretax income", stale)
     tax_expense = get_metric_value(financials, "income_tax_expense", "income tax expense", stale)
@@ -2059,9 +2110,18 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         growth_input = input(f"  Initial revenue growth rate, fading to {terminal_growth:.2%} (terminal) by "
                               "year 10\n  (e.g. 30 for 30%; Enter for 0%): ").strip()
         initial_growth = parse_number(growth_input) / 100 if growth_input else 0.0
-        margin_input = input("  Target (mature) operating margin (e.g. 20 for 20%; Enter to hold today's "
-                              "margin flat): ").strip()
-        target_margin = parse_number(margin_input) / 100 if margin_input else current_margin
+        if cycle_choice is not None:
+            # Already normalized to the cycle average above, so that's the
+            # natural default target too — a cyclical reverts to it.
+            margin_input = input(f"  Target (mature) operating margin (e.g. 20 for 20%; Enter for the "
+                                 f"{cycle_choice['span']} cycle {cycle_choice['method']}, "
+                                 f"{cycle_choice['margin']:.1%}): ").strip()
+            default_target = cycle_choice["margin"]
+        else:
+            margin_input = input("  Target (mature) operating margin (e.g. 20 for 20%; Enter to hold today's "
+                                  "margin flat): ").strip()
+            default_target = current_margin
+        target_margin = parse_number(margin_input) / 100 if margin_input else default_target
         trailing_s2c = revenue / invested_capital if invested_capital else None
         print("  Sales-to-capital ratio: how much new revenue $1 of new capital buys (2.0 ="
               " $1 buys $2 of revenue).")
@@ -2270,6 +2330,14 @@ if __name__ == "__main__":
              "historical dividend growth, a share-dilution check, and a NAV (NOI / cap "
              "rate) cross-check.",
     )
+    parser.add_argument(
+        "--cyclical", action="store_true",
+        help="Cyclical mode: always normalizes EBIT to the company's average margin over "
+             "a full cycle (up to 10 years, loss years included), with a year-by-year "
+             "table and a choice of window and averaging method, and uses that margin as "
+             "the narrative DCF's default target. Without this flag, normalization still "
+             "runs when EBIT is negative or under half its cycle average.",
+    )
     args = parser.parse_args()
 
-    run_full_valuation(args.ticker, args.stage, args.narrative, args.biotech, args.reit)
+    run_full_valuation(args.ticker, args.stage, args.narrative, args.biotech, args.reit, args.cyclical)
