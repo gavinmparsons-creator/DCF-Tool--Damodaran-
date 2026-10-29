@@ -782,7 +782,25 @@ def parse_number(text):
     return float(cleaned)
 
 
-def get_metric_value(financials, key, label, stale_metrics=None, return_override_flag=False):
+def prompt_number(prompt, default=None):
+    """
+    Ask for a number until one parses. Blank input returns `default` when
+    there is one; with no default, blank or unparseable input re-asks
+    instead of crashing the whole run with a ValueError (which previously
+    threw away every answer typed so far).
+    """
+    while True:
+        text = input(prompt).strip()
+        if not text and default is not None:
+            return default
+        try:
+            return parse_number(text)
+        except ValueError:
+            print("    Please type a number (e.g. 1000000000)" +
+                  (", or press Enter for the default." if default is not None else "."))
+
+
+def get_metric_value(financials, key, label, stale_metrics=None, return_override_flag=False, default=None):
     """Pull a metric's value out of the financials dict, or prompt the
     user to type it in manually if EDGAR didn't have it under any of our
     candidate tags.
@@ -805,19 +823,30 @@ def get_metric_value(financials, key, label, stale_metrics=None, return_override
     year gets silently discarded whenever the trailing-average lookup
     still finds 2+ historical data points from that same outdated tag —
     which was exactly the bug this parameter exists to prevent.
+
+    `default` is what pressing Enter means when the metric is MISSING —
+    for items a small company may simply not report separately because
+    they're immaterial (D&A, capex, current debt), $0 is usually the
+    right answer, so the caller passes 0.0. Without a default, a number
+    is required.
     """
     info = financials.get(key, {})
     if info.get("value") is not None:
         if stale_metrics and key in stale_metrics:
             print(f"  '{label}' resolved to a STALE value: {info['value']:,.0f} (FY{info['fiscal_year']}).")
-            override = input(f"  Press Enter to keep it, or type a corrected {label} "
-                              "(in dollars, e.g. 1000000000): ").strip()
-            if override:
-                val = parse_number(override)
-                return (val, True) if return_override_flag else val
+            val = prompt_number(f"  Press Enter to keep it, or type a corrected {label} "
+                                "(in dollars, e.g. 1000000000): ", default=info["value"])
+            overridden = val != info["value"]
+            return (val, overridden) if return_override_flag else val
         return (info["value"], False) if return_override_flag else info["value"]
     print(f"  '{label}' was not found on EDGAR under any known tag.")
-    val = parse_number(input(f"  Enter {label} manually (in dollars, e.g. 1000000000): "))
+    if default is not None:
+        print(f"  Many smaller companies don't report it separately because it's immaterial —")
+        print(f"  ${default:,.0f} is usually right then. Check the 10-K's cash-flow statement if unsure.")
+        val = prompt_number(f"  Enter {label} manually (in dollars), or press Enter for ${default:,.0f}: ",
+                            default=default)
+    else:
+        val = prompt_number(f"  Enter {label} manually (in dollars, e.g. 1000000000): ")
     return (val, True) if return_override_flag else val
 
 
@@ -1160,9 +1189,10 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     # normalizes both over a multi-year window before using them, so we
     # use a trailing 5-year average here instead of the latest year alone.
     latest_d_and_a, d_and_a_overridden = get_metric_value(
-        financials, "depreciation_amortization", "depreciation & amortization", stale, return_override_flag=True)
+        financials, "depreciation_amortization", "depreciation & amortization", stale,
+        return_override_flag=True, default=0.0)
     latest_capex, capex_overridden = get_metric_value(
-        financials, "capex", "capital expenditures", stale, return_override_flag=True)
+        financials, "capex", "capital expenditures", stale, return_override_flag=True, default=0.0)
     da_avg, _da_unit, da_years, da_n = trailing_average(facts, METRIC_TAGS["depreciation_amortization"])
     capex_avg, _capex_unit, capex_years, capex_n = trailing_average(facts, METRIC_TAGS["capex"])
     # Convert only the series that's actually denominated in fx_currency —
