@@ -1347,6 +1347,54 @@ def share_count_growth_rate(share_counts):
 
 
 # ---------------------------------------------------------------------
+# CYCLICALS: a cyclical's earnings in any one year say more about where
+# the cycle is than about the business. Damodaran's fix is to value it on
+# a NORMALIZED margin — the average over a full cycle — applied to
+# current revenue. A full cycle has troughs in it, so loss years count:
+# averaging only the profitable years pushes the "normal" margin up and
+# the valuation with it.
+# ---------------------------------------------------------------------
+
+def cycle_margin_stats(ebit_by_year, revenue_by_year):
+    """
+    Operating margin over a cycle, three ways. Both inputs are lists of
+    the same length, one entry per year (order doesn't matter for the
+    statistics). Years with zero or negative revenue are skipped — a
+    margin isn't defined there — but loss years are KEPT.
+
+        mean       — simple average of each year's margin: every year
+                     counts equally (Damodaran's usual "average margin
+                     over the cycle")
+        aggregate  — total EBIT / total revenue: big-revenue years count
+                     more, which matters when revenue itself swings with
+                     the cycle (commodity prices, volumes)
+        median     — middle year's margin: a check against one freak
+                     year (a huge write-down, a one-off windfall) pulling
+                     the mean around
+
+    Returns a dict: margins (per year, same order as given, None where
+    skipped), mean, aggregate, median, n_years. Raises ValueError if no
+    year has positive revenue.
+    """
+    if len(ebit_by_year) != len(revenue_by_year):
+        raise ValueError("ebit_by_year and revenue_by_year must be the same length")
+    margins = [e / r if r > 0 else None for e, r in zip(ebit_by_year, revenue_by_year)]
+    used = [(e, r, m) for e, r, m in zip(ebit_by_year, revenue_by_year, margins) if m is not None]
+    if not used:
+        raise ValueError("need at least one year with positive revenue")
+    valid = sorted(m for _, _, m in used)
+    n = len(valid)
+    median = valid[n // 2] if n % 2 else (valid[n // 2 - 1] + valid[n // 2]) / 2
+    return {
+        "margins": margins,
+        "mean": sum(valid) / n,
+        "aggregate": sum(e for e, _, _ in used) / sum(r for _, r, _ in used),
+        "median": median,
+        "n_years": n,
+    }
+
+
+# ---------------------------------------------------------------------
 # SELF-TEST: validate the math against a simple worked example.
 # Run this file directly (python3 model.py) to see it check itself.
 # ---------------------------------------------------------------------
@@ -1996,5 +2044,25 @@ if __name__ == "__main__":
     print(f"Share count growth: {dilution:.4f}  (expected 0.1000)")
     assert abs(dilution - 0.10) < 1e-12, "Share count growth mismatch!"
     assert share_count_growth_rate([100]) is None, "One data point must return None!"
+
+    # cycle_margin_stats: three years — EBIT 20 on 100 (20%), -10 on 50
+    # (-20%), 30 on 150 (20%).
+    #   mean = (0.20 - 0.20 + 0.20) / 3 = 0.0667
+    #   aggregate = (20 - 10 + 30) / (100 + 50 + 150) = 40 / 300 = 0.1333
+    #   median = 0.20
+    cycle = cycle_margin_stats([20, -10, 30], [100, 50, 150])
+    print(f"Cycle margins: mean {cycle['mean']:.4f} (expected 0.0667), aggregate "
+          f"{cycle['aggregate']:.4f} (expected 0.1333), median {cycle['median']:.4f} (expected 0.2000)")
+    assert abs(cycle["mean"] - 0.2 / 3) < 1e-12, "Cycle mean margin mismatch!"
+    assert abs(cycle["aggregate"] - 40 / 300) < 1e-12, "Cycle aggregate margin mismatch!"
+    assert abs(cycle["median"] - 0.20) < 1e-12, "Cycle median margin mismatch!"
+    # The loss year must be KEPT — dropping it is exactly the upward bias
+    # this function exists to avoid.
+    assert cycle["n_years"] == 3, "Loss years must count toward the cycle average!"
+    # Even-count median averages the middle two; zero-revenue years are skipped.
+    even = cycle_margin_stats([10, 20, 5, 0], [100, 100, 100, 0])
+    assert even["n_years"] == 3 and even["margins"][3] is None, "Zero-revenue year must be skipped!"
+    assert abs(cycle_margin_stats([10, 30], [100, 100])["median"] - 0.20) < 1e-12, \
+        "Even-count median must average the middle two margins!"
 
     print("\n✓ All self-tests passed. The math is internally consistent.")
