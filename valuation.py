@@ -1088,7 +1088,8 @@ def prompt_number(prompt, default=None):
                   (", or press Enter for the default." if default is not None else "."))
 
 
-def get_metric_value(financials, key, label, stale_metrics=None, return_override_flag=False, default=None):
+def get_metric_value(financials, key, label, stale_metrics=None, return_override_flag=False, default=None,
+                     default_reason=None):
     """Pull a metric's value out of the financials dict, or prompt the
     user to type it in manually if EDGAR didn't have it under any of our
     candidate tags.
@@ -1129,9 +1130,12 @@ def get_metric_value(financials, key, label, stale_metrics=None, return_override
         return (info["value"], False) if return_override_flag else info["value"]
     print(f"  '{label}' was not found on EDGAR under any known tag.")
     if default is not None:
-        print(f"  Many smaller companies don't report it separately because it's immaterial —")
-        print(f"  ${default:,.0f} is usually right then. Check the 10-K's cash-flow statement if unsure.")
-        val = prompt_number(f"  Enter {label} manually (in dollars), or press Enter for ${default:,.0f}: ",
+        if default_reason:
+            print(f"  {default_reason}")
+        else:
+            print(f"  Many smaller companies don't report it separately because it's immaterial —")
+            print(f"  ${default:,.0f} is usually right then. Check the 10-K's cash-flow statement if unsure.")
+        val = prompt_number(f"  Enter {label} manually, or press Enter for {default:,.0f}: ",
                             default=default)
     else:
         val = prompt_number(f"  Enter {label} manually (in dollars, e.g. 1000000000): ")
@@ -1657,6 +1661,161 @@ SIC_TO_DAMODARAN_INDUSTRY = [
 ]
 
 
+# ---------------------------------------------------------------------
+# ADRs: a foreign company's filings count its ORDINARY shares, but the US
+# price is per American Depositary Share, which can stand for several of
+# them (Alibaba: 1 ADS = 8 ordinary shares; TSMC 5; BP 6; JD 2). Mixing
+# the two made value per share come out ratio-times too low and market
+# cap ratio-times too high — which also corrupted D/E, the relevered beta
+# and the WACC weights. The ratio isn't an XBRL tag, so it's read off the
+# latest 20-F's cover page ("each ADS representing eight ordinary
+# shares"), cross-checked against the ratio implied by the market's own
+# ADS count (filed ordinary shares / Yahoo's shares), confirmed, and
+# saved per ticker in data/adr_ratios.json. Everything per-share is then
+# done in ADS units.
+# ---------------------------------------------------------------------
+
+ADR_RATIO_PATH = os.path.join(DATA_DIR, "adr_ratios.json")
+FOREIGN_ANNUAL_FORMS = ("20-F", "40-F")
+_NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+                 "nine": 9, "ten": 10, "twelve": 12, "fifteen": 15, "twenty": 20}
+_ADR_RATIO_PATTERN = re.compile(
+    r"(?i)(?:ADSs?|American Depositary Shares?|depositary shares?)\b[^.;]{0,140}?\b"
+    r"(one|two|three|four|five|six|seven|eight|nine|ten|twelve|fifteen|twenty|\d+(?:\.\d+)?)"
+    r"\s*(?:\(\d+(?:\.\d+)?\)\s*)?(?:[\w\-]+\s+){0,3}?(?:ordinary|common)\s+shares?")
+
+
+def latest_annual_filing(cik):
+    """(form, document URL) of the most recent 10-K / 20-F / 40-F, from
+    EDGAR's submissions index, or (None, None)."""
+    data = fetch_json_or_none(EDGAR_SUBMISSIONS_URL.format(cik=cik))
+    try:
+        recent = data["filings"]["recent"]
+        i = next(i for i, f in enumerate(recent["form"]) if f in ("10-K",) + FOREIGN_ANNUAL_FORMS)
+        url = (f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/"
+               f"{recent['accessionNumber'][i].replace('-', '')}/{recent['primaryDocument'][i]}")
+        return recent["form"][i], url
+    except (TypeError, KeyError, StopIteration):
+        return None, None
+
+
+def adr_ratio_candidates(filing_url):
+    """Every 'ADS ... represents N ordinary/common shares' number in the
+    filing, as {ratio: times mentioned}. Large filings (BP's 20-F is
+    ~30 MB) take a few seconds, which is why the answer gets saved."""
+    try:
+        with urlopen(Request(filing_url, headers={"User-Agent": USER_AGENT}), timeout=90) as resp:
+            page = resp.read().decode("utf-8", errors="replace")
+    except Exception:
+        return {}
+    text = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", page)).split())
+    counts = {}
+    for m in _ADR_RATIO_PATTERN.finditer(text):
+        word = m.group(1).lower()
+        try:
+            value = float(_NUMBER_WORDS.get(word, word))
+        except ValueError:
+            continue
+        if 0 < value <= 100:
+            counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def get_market_shares(ticker):
+    """The market's own share count for this ticker — for an ADR, in ADS
+    units — from yfinance (implied shares cover every share class) or
+    FMP (market cap / price). None if neither is available."""
+    if YFINANCE_AVAILABLE:
+        try:
+            info = yf.Ticker(ticker).info
+            shares = info.get("impliedSharesOutstanding") or info.get("sharesOutstanding")
+            if shares:
+                return float(shares)
+        except Exception:
+            pass
+    if FMP_API_KEY:
+        try:
+            with urlopen(Request(FMP_PROFILE_URL.format(ticker=ticker.upper(), key=FMP_API_KEY),
+                                 headers={"User-Agent": USER_AGENT}), timeout=20) as resp:
+                profile = json.loads(resp.read().decode("utf-8"))[0]
+            if profile.get("mktCap") and profile.get("price"):
+                return float(profile["mktCap"]) / float(profile["price"])
+        except Exception:
+            pass
+    return None
+
+
+def resolve_adr_ratio(ticker, cik, filed_shares):
+    """
+    Ordinary shares per ADS for a foreign (20-F/40-F) filer, 1.0 for
+    everyone else. Returns (ratio, market_shares, counts_disagree).
+    Prefers a saved answer; otherwise the cover page's most-mentioned
+    figure (word and digit forms counted together — Baidu says "eight"
+    and "8" eleven times, "1"/"one" nine), falling back to the
+    market-implied ratio only when the cover page has no ratio sentence
+    at all. The market-implied ratio is a CROSS-CHECK, not an override:
+    when it disagrees, the usual culprit is the filed share count, not
+    the ratio — Baidu tags only one share class, so filed / market came
+    out 0.10 — and counts_disagree tells the caller to default the share
+    count to the market's ADS count x ratio instead.
+    """
+    form, filing_url = latest_annual_filing(cik)
+    if form not in FOREIGN_ANNUAL_FORMS:
+        return 1.0, None, False
+    market_shares = get_market_shares(ticker)
+    implied = filed_shares / market_shares if filed_shares and market_shares else None
+    try:
+        with open(ADR_RATIO_PATH) as f:
+            saved = json.load(f).get(ticker.upper())
+    except (OSError, ValueError):
+        saved = None
+
+    print(f"\n{'='*60}")
+    print(f"  ADR ratio (foreign filer — files a {form})")
+    print(f"{'='*60}")
+    if saved:
+        ratio, source = float(saved), "saved choice"
+    else:
+        print("  Reading the ADS ratio off the annual report's cover page (one-time, then saved)...")
+        candidates = adr_ratio_candidates(filing_url) if filing_url else {}
+        if candidates:
+            # Most mentions wins; closeness to the market-implied ratio only breaks ties.
+            ratio = max(candidates, key=lambda c: (candidates[c], -abs(c - implied) if implied else 0))
+            source = f"cover page ({candidates[ratio]} mention(s))"
+        elif implied:
+            nearest = round(implied)
+            ratio = float(nearest) if nearest and abs(implied - nearest) / nearest < 0.05 else round(implied, 2)
+            source = "market-implied (no ratio sentence found)"
+        else:
+            ratio, source = 1.0, "default (no ratio found)"
+    print(f"  Ordinary shares per ADS: {ratio:g}  ({source})")
+    if implied:
+        print(f"  Cross-check: filed ordinary shares / market ADS count = {implied:.2f}")
+    ratio = prompt_number(f"  Press Enter to use {ratio:g}, or type the ratio (ordinary shares per ADS): ",
+                          default=ratio)
+    if ratio <= 0:
+        print("  The ratio has to be positive — using 1.")
+        ratio = 1.0
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        try:
+            with open(ADR_RATIO_PATH) as f:
+                all_saved = json.load(f)
+        except (OSError, ValueError):
+            all_saved = {}
+        all_saved[ticker.upper()] = ratio
+        with open(ADR_RATIO_PATH, "w") as f:
+            json.dump(all_saved, f, indent=2, sort_keys=True)
+    except OSError:
+        pass
+    counts_disagree = bool(implied) and abs(implied - ratio) / ratio > 0.15
+    if counts_disagree:
+        print(f"  ⚠ The filed share count implies {implied:.2f}, not {ratio:g} — usually the filing")
+        print("    counts only one share class, or the count is out of date. The share count")
+        print("    below defaults to the market's ADS count x the ratio instead.")
+    return ratio, market_shares, counts_disagree
+
+
 def get_sic(cik):
     """(SIC code as int, its description) from EDGAR, or (None, None)."""
     data = fetch_json_or_none(EDGAR_SUBMISSIONS_URL.format(cik=cik))
@@ -2052,7 +2211,23 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         print(f"  Short-term investments: ${sti_val:,.0f} (tag: {sti_tag}, FY{sti_fy}) — added to cash,")
         print(f"  as Damodaran does. Cash + investments: ${cash + sti_val:,.0f}")
         cash += sti_val
-    shares_out = get_metric_value(financials, "shares_outstanding", "shares outstanding", stale)
+    adr_ratio, market_shares, adr_counts_disagree = resolve_adr_ratio(
+        ticker, cik, financials["shares_outstanding"]["value"])
+    if adr_counts_disagree and market_shares:
+        filed_count = financials["shares_outstanding"]["value"]
+        print(f"  Filed ordinary shares: {filed_count:,.0f}   Market ADS count x ratio: "
+              f"{market_shares * adr_ratio:,.0f}")
+        shares_out = prompt_number("  Press Enter to use the market-based count, or type the ordinary share count: ",
+                                   default=market_shares * adr_ratio)
+    else:
+        shares_out = get_metric_value(
+            financials, "shares_outstanding", "shares outstanding (ordinary)", stale,
+            default=market_shares * adr_ratio if market_shares else None,
+            default_reason="Default: the market's ADS count x the ADR ratio." if market_shares else None)
+    if adr_ratio != 1.0:
+        shares_out /= adr_ratio
+        print(f"  Per-share math in ADS units: {shares_out:,.0f} ADS-equivalent shares "
+              f"({adr_ratio:g} ordinary shares each).")
 
     book_equity = get_metric_value(financials, "book_equity", "total stockholders' equity (book value)", stale)
 
@@ -2448,6 +2623,8 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         # simple equality the way other metrics' units can.
         if latest_dps is not None and fx_currency and _dps_unit and _dps_unit.startswith(f"{fx_currency}/"):
             latest_dps *= fx_rate
+        if latest_dps is not None:
+            latest_dps *= adr_ratio  # per ordinary share in the filing -> per ADS
         print(f"\n{'='*60}")
         print("  Dividend discount model (high reinvestment rate detected)")
         print(f"{'='*60}")
@@ -2509,7 +2686,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
                                         *reit_args, default=0.10 * re_depreciation)
         dps = reit_metric(facts, "Dividend per share", [
             "CommonStockDividendsPerShareCashPaid", "CommonStockDividendsPerShareDeclared"],
-            *reit_args, default=0.0, per_share=True)
+            *reit_args, default=0.0, per_share=True) * adr_ratio
         preferred = reit_metric(facts, "Preferred equity", ["PreferredStockValue"], *reit_args, default=0.0)
         # Some REITs (e.g. Realty Income) don't tag operating income at all;
         # rebuild it from net income + interest - gains (REITs pay ~no tax).
@@ -2642,8 +2819,8 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         val, tag, fy, unit = (freshest_instant if instant else freshest_annual_value)(facts, tags)
         if val is None or fy is None or fy < latest_fy_all:
             return 0.0, None
-        if fx_currency and unit == fx_currency:
-            val *= fx_rate
+        if fx_currency and unit and (unit == fx_currency or unit.startswith(f"{fx_currency}/")):
+            val *= fx_rate  # a per-share price like an option strike is "TWD/shares", not "TWD"
         return val, tag
 
     minority_interest, _ = current_value(["MinorityInterest"])
@@ -2658,6 +2835,12 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         ["ShareBasedCompensationArrangementByShareBasedPaymentAwardOptionsOutstandingWeightedAverageExercisePrice"])
     diluted_shares, _ = current_value(["WeightedAverageNumberOfDilutedSharesOutstanding"], instant=False)
     basic_shares, _ = current_value(["WeightedAverageNumberOfSharesOutstandingBasic"], instant=False)
+    if adr_ratio != 1.0:
+        # Filed in ordinary shares; the price and share count are in ADS units.
+        options_outstanding /= adr_ratio
+        option_strike *= adr_ratio
+        diluted_shares /= adr_ratio
+        basic_shares /= adr_ratio
 
     option_volatility = industry_equity_vol or 0.40
     option_years = 5.0  # weighted remaining term isn't in companyfacts; employee options typically run ~4-6 yrs
