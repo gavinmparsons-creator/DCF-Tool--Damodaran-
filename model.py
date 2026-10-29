@@ -1275,6 +1275,29 @@ def _normal_cdf(x):
     return 0.5 * (1 + math.erf(x / math.sqrt(2)))
 
 
+def black_scholes_call(spot, strike, years, volatility, risk_free_rate, dividend_yield=0.0):
+    """
+    Black-Scholes value of one European call. Used to value employee
+    stock options outstanding, which Damodaran subtracts from equity
+    value as a claim on it — rather than adding them to the share count,
+    which ignores that holders must pay the exercise price, or ignoring
+    them, which overstates value per share. Returns 0 for a worthless
+    option (zero spot) and intrinsic value at zero time or volatility.
+    """
+    if spot <= 0:
+        return 0.0
+    if years <= 0 or volatility <= 0:
+        return max(0.0, spot * math.exp(-dividend_yield * max(years, 0))
+                   - strike * math.exp(-risk_free_rate * max(years, 0)))
+    if strike <= 0:
+        return spot * math.exp(-dividend_yield * years)
+    d1 = (math.log(spot / strike) + (risk_free_rate - dividend_yield + volatility ** 2 / 2) * years) \
+        / (volatility * math.sqrt(years))
+    d2 = d1 - volatility * math.sqrt(years)
+    return (spot * math.exp(-dividend_yield * years) * _normal_cdf(d1)
+            - strike * math.exp(-risk_free_rate * years) * _normal_cdf(d2))
+
+
 def patent_option_value(pv_commercial, development_cost, exclusivity_years, volatility,
                         risk_free_rate, dividend_yield=None):
     """
@@ -2204,5 +2227,13 @@ if __name__ == "__main__":
     assert abs(enterprise_value_multi_stage(100, 0.05, 2, 0, 0.02, 0.10)
                - (105 / 1.1 + 110.25 / 1.21 + terminal_value(110.25, 0.02, 0.10) / 1.21)) < 1e-6, \
         "Multi-stage EV without base_nopat must keep the old terminal value!"
+
+    # black_scholes_call: textbook case S=100, K=100, t=1, sigma=20%, r=5% -> 10.4506.
+    bs = black_scholes_call(100, 100, 1, 0.20, 0.05)
+    print(f"Black-Scholes call: {bs:.4f}  (expected 10.4506)")
+    assert abs(bs - 10.4506) < 1e-4, "Black-Scholes call mismatch!"
+    # Edge cases: zero vol/time -> intrinsic value; deep out of the money -> ~0.
+    assert abs(black_scholes_call(120, 100, 0, 0.3, 0.05) - 20) < 1e-9, "Zero-time option must be worth intrinsic value!"
+    assert black_scholes_call(10, 100, 1, 0.2, 0.05) < 1e-6, "Deep out-of-the-money option must be worth ~0!"
 
     print("\n✓ All self-tests passed. The math is internally consistent.")
