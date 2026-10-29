@@ -857,6 +857,41 @@ def trailing_twelve_months(facts_json, tag, unit, annual_end, annual_val):
     return annual_val + current["val"] - prior_ytd["val"], current["end"]
 
 
+def latest_reported_dilution(facts_json):
+    """
+    The company's own reported dilution: weighted-average DILUTED shares
+    minus BASIC shares for the most recent period that reports both (a
+    10-Q quarter if newer than the 10-K, else the fiscal year). Diluted
+    shares are computed by the company under the treasury-stock method
+    from every actual option tranche, RSU and convertible, and audited —
+    no assumed option term, volatility or averaged strike, which is why
+    this is used instead of valuing options with Black-Scholes.
+
+    Returns (dilutive_shares, period_label), (0.0, label) when diluted
+    equals basic (normal in a loss period, when dilution is excluded as
+    anti-dilutive — so "none reported", not "none exists"), or (None,
+    None) when the counts aren't reported at all.
+    """
+    tags = _all_taxonomy_tags(facts_json)
+    def periods(tag):
+        out = {}
+        for e in tags.get(tag, {}).get("units", {}).get("shares", []):
+            if e.get("form") in ("10-K", "10-Q", "20-F", "40-F") and e.get("start") and e.get("end"):
+                out[(e["start"], e["end"])] = e["val"]  # later filings overwrite, so restatements win
+        return out
+    diluted = periods("WeightedAverageNumberOfDilutedSharesOutstanding")
+    basic = periods("WeightedAverageNumberOfSharesOutstandingBasic")
+    common = set(diluted) & set(basic)
+    if not common:
+        return None, None
+    # Most recent end date; for that date, the shortest period (the quarter) is the most current.
+    start, end = max(common, key=lambda p: (p[1], p[0]))
+    days = _days(start, end)
+    label = (f"quarter ending {end}" if days < 120 else
+             f"year to date ending {end}" if days < 330 else f"year ending {end}")
+    return max(0.0, diluted[(start, end)] - basic[(start, end)]), label
+
+
 def freshest_instant(facts_json, tag_candidates):
     """freshest_annual_value for a balance-sheet item, upgraded to the
     latest 10-Q value when one is newer — so items pulled outside the
@@ -1407,10 +1442,6 @@ def parse_damodaran_betas(page):
         i_unlev, i_cash = col("Unlevered beta"), col("Unlevered beta corrected for cash")
     except StopIteration:
         return None
-    try:
-        i_sd = col("Standard deviation of equity")
-    except StopIteration:
-        i_sd = None  # optional: only used as a default option volatility
     industries = {}
     for r in rows:
         if len(r) <= max(i_firms, i_beta, i_de, i_unlev, i_cash) or r[0] == "Industry Name":
@@ -1421,8 +1452,6 @@ def parse_damodaran_betas(page):
                 "de_ratio": float(r[i_de].rstrip("%")) / 100,
                 "unlevered_beta": float(r[i_unlev]), "unlevered_beta_cash": float(r[i_cash]),
             }
-            if i_sd is not None and len(r) > i_sd:
-                industries[r[0]]["stdev_equity"] = float(r[i_sd].rstrip("%")) / 100
         except ValueError:
             continue
     updated = re.search(r"(?i)Updated in ([A-Za-z]+ \d{4})", page)
@@ -2458,7 +2487,6 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     print(f"  Company's D/E (debt/market cap):    {debt_to_equity:.2f}")
     beta_source = "regression beta (as pulled)"
     industry_beta = None
-    industry_equity_vol = None  # weighted std dev of equity for the chosen industries — default option volatility
     if damodaran["betas"]:
         industries = damodaran["betas"]["industries"]
         if fx_currency:
@@ -2478,9 +2506,6 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
                   f"{DEFAULT_MARGINAL_TAX_RATE:.0%} marginal tax: {industry_beta:.2f}")
             print(f"  (Damodaran's US industry betas, updated {damodaran['betas']['updated']})")
             industry_label = " + ".join(name for name, _ in mix)
-            if all("stdev_equity" in industries[name] for name, _ in mix):
-                industry_equity_vol = model.weighted_unlevered_beta(
-                    [(industries[name]["stdev_equity"], weight) for name, weight in mix])
     else:
         print("  Damodaran's industry betas couldn't be loaded (no connection and no cache).")
 
@@ -2971,18 +2996,18 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     #   - preferred stock
     #   - unfunded pensions, after tax (a debt-like promise, tax-deductible
     #     when paid)
-    #   - employee stock options outstanding, valued as options (Black-
-    #     Scholes) — not added to the share count, which ignores the
-    #     exercise price holders pay
     #   + cash and short-term investments (above)
     #   + equity-method stakes in other companies, whose earnings sit
     #     below operating income and so are outside the DCF
-    # Restricted stock units and other dilution are added to the share
-    # count, estimated as diluted minus basic shares less the in-the-money
-    # options already valued (EDGAR doesn't carry current RSU counts —
-    # they're reported per award type, which companyfacts leaves out).
-    # Book values stand in for market values on minority interests and
-    # equity stakes. Each item is shown and can be edited. ----
+    # Employee options, RSUs and convertibles enter as the company's own
+    # reported dilution — diluted minus basic shares (latest_reported_
+    # dilution) — added to the share count. Valuing options with Black-
+    # Scholes instead would need an option term and volatility that EDGAR
+    # doesn't carry, i.e. assumed inputs fed into a model; the reported
+    # treasury-stock count uses every real tranche and is audited, at the
+    # cost of counting out-of-the-money options as zero. Book values
+    # stand in for market values on minority interests and equity stakes
+    # (as reported, rather than estimated). Each item can be edited. ----
     def current_value(tags, instant=True):
         val, tag, fy, unit = (freshest_instant if instant else freshest_annual_value)(facts, tags)
         if val is None or fy is None or fy < latest_fy_all:
@@ -2997,28 +3022,9 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
                                           "PensionAndOtherPostretirementDefinedBenefitPlansLiabilitiesNoncurrent",
                                           "LiabilityDefinedBenefitPlanNoncurrent"])
     equity_investments, _ = current_value(["EquityMethodInvestments"])
-    options_outstanding, _ = current_value(
-        ["ShareBasedCompensationArrangementByShareBasedPaymentAwardOptionsOutstandingNumber"])
-    option_strike, _ = current_value(
-        ["ShareBasedCompensationArrangementByShareBasedPaymentAwardOptionsOutstandingWeightedAverageExercisePrice"])
-    diluted_shares, _ = current_value(["WeightedAverageNumberOfDilutedSharesOutstanding"], instant=False)
-    basic_shares, _ = current_value(["WeightedAverageNumberOfSharesOutstandingBasic"], instant=False)
-    if adr_ratio != 1.0:
-        # Filed in ordinary shares; the price and share count are in ADS units.
-        options_outstanding /= adr_ratio
-        option_strike *= adr_ratio
-        diluted_shares /= adr_ratio
-        basic_shares /= adr_ratio
-
-    option_volatility = industry_equity_vol or 0.40
-    option_years = 5.0  # weighted remaining term isn't in companyfacts; employee options typically run ~4-6 yrs
-    option_value, tsm_option_shares = 0.0, 0.0
-    if options_outstanding > 0 and option_strike > 0:
-        option_value = options_outstanding * model.black_scholes_call(
-            share_price, option_strike, option_years, option_volatility, risk_free_rate)
-        tsm_option_shares = options_outstanding * max(0.0, share_price - option_strike) / share_price
-    other_dilution_shares = (max(0.0, diluted_shares - basic_shares - tsm_option_shares)
-                             if diluted_shares and basic_shares else 0.0)
+    other_dilution_shares, dilution_period = latest_reported_dilution(facts)
+    dilution_reported = other_dilution_shares is not None
+    other_dilution_shares = (other_dilution_shares or 0.0) / adr_ratio  # filed in ordinary shares -> ADS units
 
     def show_bridge():
         print(f"  - Debt (incl. operating leases):          ${total_debt:>18,.0f}")
@@ -3026,21 +3032,21 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         print(f"  - Preferred stock:                        ${bridge_preferred:>18,.0f}")
         print(f"  - Unfunded pensions (x {1 - DEFAULT_MARGINAL_TAX_RATE:.0%} after tax):     "
               f"${pension_liability * (1 - DEFAULT_MARGINAL_TAX_RATE):>18,.0f}")
-        print(f"  - Employee options outstanding:           ${option_value:>18,.0f}" +
-              (f"   ({options_outstanding:,.0f} @ ${option_strike:,.2f}, {option_volatility:.0%} vol, "
-               f"{option_years:.0f} yrs)" if option_value else ""))
         print(f"  + Cash and short-term investments:        ${cash:>18,.0f}")
         print(f"  + Equity-method investments (book):       ${equity_investments:>18,.0f}")
-        print(f"  Shares: {shares_out:,.0f} basic + {other_dilution_shares:,.0f} RSUs/other dilution "
+        print(f"  Shares: {shares_out:,.0f} basic + {other_dilution_shares:,.0f} options/RSUs/converts "
               f"= {shares_out + other_dilution_shares:,.0f}")
+        print("    (dilution = the company's reported diluted - basic shares, "
+              + (f"{dilution_period})" if dilution_reported else "not reported)"))
 
     print(f"\n{'='*60}")
     print("  Equity bridge (operating value -> value per share)")
     print(f"{'='*60}")
     show_bridge()
-    if diluted_shares and diluted_shares <= basic_shares:
-        print("  (Diluted = basic shares: usual for a loss-making year, when dilution is excluded")
-        print("  as anti-dilutive — RSUs may be missing; enter a count below if you know it.)")
+    if dilution_reported and other_dilution_shares == 0:
+        print("  (Diluted = basic for that period: usual when the company had a loss, since dilution")
+        print("  is then excluded as anti-dilutive — so none is REPORTED, which doesn't mean none")
+        print("  exists. Enter a count below if you have it from the filing's equity note.)")
     if input("  Press Enter to accept, or type e to edit each item: ").strip().lower() == "e":
         minority_interest = prompt_number(f"    Minority interests (Enter for ${minority_interest:,.0f}): ",
                                           default=minority_interest)
@@ -3048,17 +3054,15 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
                                          default=bridge_preferred)
         pension_liability = prompt_number(f"    Unfunded pension, before tax (Enter for ${pension_liability:,.0f}): ",
                                           default=pension_liability)
-        option_value = prompt_number(f"    Value of employee options (Enter for ${option_value:,.0f}): ",
-                                     default=option_value)
         equity_investments = prompt_number(f"    Equity-method investments (Enter for ${equity_investments:,.0f}): ",
                                            default=equity_investments)
-        other_dilution_shares = prompt_number(f"    RSUs/other dilutive shares (Enter for {other_dilution_shares:,.0f}): ",
-                                              default=other_dilution_shares)
+        other_dilution_shares = prompt_number(f"    Dilutive shares — options/RSUs/converts (Enter for "
+                                              f"{other_dilution_shares:,.0f}): ", default=other_dilution_shares)
         show_bridge()
     # What the per-share math subtracts and adds; total_debt itself stays
     # pure debt, since that's what belongs in D/E and WACC.
     bridge_debt = (total_debt + minority_interest + bridge_preferred
-                   + pension_liability * (1 - DEFAULT_MARGINAL_TAX_RATE) + option_value)
+                   + pension_liability * (1 - DEFAULT_MARGINAL_TAX_RATE))
     bridge_cash = cash + equity_investments
     value_shares = shares_out + other_dilution_shares
 
