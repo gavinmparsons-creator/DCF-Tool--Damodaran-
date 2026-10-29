@@ -357,6 +357,48 @@ def terminal_value(final_year_fcff, terminal_growth_rate, discount_rate):
     return final_year_fcff * (1 + terminal_growth_rate) / (discount_rate - terminal_growth_rate)
 
 
+def stable_growth_fcff(final_year_nopat, terminal_growth_rate, return_on_new_capital):
+    """
+    FCFF in the first stable-growth year, Damodaran-style: growth isn't
+    free, so a company growing at g forever must reinvest g / RONIC of its
+    after-tax operating income every year, where RONIC is the return it
+    earns on that new capital:
+
+        FCFF(n+1) = NOPAT(n) x (1 + g) x (1 - g / RONIC)
+
+    A negative g gives a negative reinvestment rate — capital released as
+    the business shrinks — which is left as is.
+    """
+    if return_on_new_capital <= 0:
+        raise ValueError("return_on_new_capital must be positive")
+    reinvestment_rate = terminal_growth_rate / return_on_new_capital
+    return final_year_nopat * (1 + terminal_growth_rate) * (1 - reinvestment_rate)
+
+
+def terminal_value_consistent(final_year_nopat, terminal_growth_rate, discount_rate,
+                              return_on_new_capital=None):
+    """
+    Gordon Growth terminal value with reinvestment consistent with growth
+    (see stable_growth_fcff), instead of growing whatever the last
+    forecast year's FCFF happened to be. The plain terminal_value() above
+    silently assumes the final year's reinvestment rate holds forever —
+    too much reinvestment for a company still in a heavy-investment year,
+    too little (free growth) for one whose final year happens to be light
+    — and the terminal value is usually most of the total.
+
+    return_on_new_capital defaults to the discount rate: Damodaran's
+    standard assumption that competition drives excess returns on NEW
+    investment to zero in perpetuity, which also makes the value
+    insensitive to the growth rate chosen (growth that earns only its
+    cost of capital adds nothing). Pass a higher figure for a durable
+    competitive advantage.
+    """
+    if discount_rate <= terminal_growth_rate:
+        raise ValueError("Discount rate must exceed terminal growth rate (Gordon Growth requires this)")
+    ronic = discount_rate if return_on_new_capital is None else return_on_new_capital
+    return stable_growth_fcff(final_year_nopat, terminal_growth_rate, ronic) / (discount_rate - terminal_growth_rate)
+
+
 def enterprise_value(base_fcff, growth_rate, discount_rate, terminal_growth_rate, years=5):
     """
     Full DCF: project FCFF, discount it, add discounted terminal value.
@@ -472,12 +514,19 @@ def project_fcff_multi_stage(base_fcff, high_growth_rate, high_growth_years,
 
 
 def enterprise_value_multi_stage(base_fcff, high_growth_rate, high_growth_years,
-                                  fade_years, terminal_growth_rate, discount_rate):
+                                  fade_years, terminal_growth_rate, discount_rate,
+                                  base_nopat=None, return_on_new_capital=None):
     """
     Full three-stage DCF: project FCFF through the high-growth and fade
     stages, discount each year back, add the discounted Gordon Growth
-    terminal value computed off the final projected year. Returns
-    enterprise value (before subtracting debt / adding cash).
+    terminal value. Returns enterprise value (before subtracting debt /
+    adding cash).
+
+    With base_nopat given, the terminal value is reinvestment-consistent
+    (terminal_value_consistent): NOPAT is grown along the same growth path
+    as FCFF, and stable-growth FCFF is rebuilt from it with reinvestment
+    = g / return_on_new_capital (default: the discount rate). Without it,
+    the final projected FCFF is grown as is (the older behavior).
     """
     projected = project_fcff_multi_stage(base_fcff, high_growth_rate, high_growth_years,
                                           fade_years, terminal_growth_rate)
@@ -488,7 +537,13 @@ def enterprise_value_multi_stage(base_fcff, high_growth_rate, high_growth_years,
     pv_of_explicit_period = sum(discounted)
 
     total_years = len(projected)
-    tv = terminal_value(projected[-1], terminal_growth_rate, discount_rate)
+    if base_nopat is not None:
+        growth_factor = project_fcff_multi_stage(1.0, high_growth_rate, high_growth_years,
+                                                 fade_years, terminal_growth_rate)[-1]
+        tv = terminal_value_consistent(base_nopat * growth_factor, terminal_growth_rate, discount_rate,
+                                       return_on_new_capital)
+    else:
+        tv = terminal_value(projected[-1], terminal_growth_rate, discount_rate)
     pv_of_terminal_value = tv / ((1 + discount_rate) ** total_years)
 
     return pv_of_explicit_period + pv_of_terminal_value
@@ -497,11 +552,14 @@ def enterprise_value_multi_stage(base_fcff, high_growth_rate, high_growth_years,
 def run_valuation_range_multi_stage(base_fcff, high_growth_rate, high_growth_years,
                                      fade_years, discount_rate, terminal_growth_rate,
                                      total_debt, cash, shares_outstanding,
-                                     wacc_spread=0.01, growth_spread=0.005):
+                                     wacc_spread=0.01, growth_spread=0.005,
+                                     base_nopat=None, return_on_new_capital=None):
     """
     Same low/base/high sensitivity range as run_valuation_range, but off
     the three-stage (high growth -> fade -> terminal) FCFF projection
     instead of one flat growth rate for the whole explicit period.
+    base_nopat / return_on_new_capital: see enterprise_value_multi_stage
+    (a None return_on_new_capital means each scenario's own WACC).
     """
     scenarios = {
         "low":  (discount_rate + wacc_spread, terminal_growth_rate - growth_spread),
@@ -512,7 +570,7 @@ def run_valuation_range_multi_stage(base_fcff, high_growth_rate, high_growth_yea
     results = {}
     for label, (dr, tgr) in scenarios.items():
         ev = enterprise_value_multi_stage(base_fcff, high_growth_rate, high_growth_years,
-                                           fade_years, tgr, dr)
+                                           fade_years, tgr, dr, base_nopat, return_on_new_capital)
         per_share, equity_val = equity_value_per_share(ev, total_debt, cash, shares_outstanding)
         results[label] = {
             "discount_rate": dr,
@@ -527,7 +585,8 @@ def run_valuation_range_multi_stage(base_fcff, high_growth_rate, high_growth_yea
 def solve_implied_growth_rate(target_price, base_fcff, high_growth_years, fade_years,
                                discount_rate, terminal_growth_rate,
                                total_debt, cash, shares_outstanding,
-                               lo=-0.95, hi=5.0, iterations=200):
+                               lo=-0.95, hi=5.0, iterations=200,
+                               base_nopat=None, return_on_new_capital=None):
     """
     Binary-search for the high-growth-stage rate that makes the per-share
     DCF value equal target_price, holding WACC, terminal growth, stage
@@ -550,7 +609,8 @@ def solve_implied_growth_rate(target_price, base_fcff, high_growth_years, fade_y
 
     def price_for_growth(g):
         ev = enterprise_value_multi_stage(base_fcff, g, high_growth_years, fade_years,
-                                           terminal_growth_rate, discount_rate)
+                                           terminal_growth_rate, discount_rate,
+                                           base_nopat, return_on_new_capital)
         per_share, _ = equity_value_per_share(ev, total_debt, cash, shares_outstanding)
         return per_share
 
@@ -850,7 +910,7 @@ def project_narrative_path(current_revenue, initial_growth_rate, current_margin,
 
 def enterprise_value_narrative(current_revenue, initial_growth_rate, current_margin, target_margin,
                                 tax_rate, sales_to_capital_ratio, discount_rate, terminal_growth_rate,
-                                years=10):
+                                years=10, return_on_new_capital=None):
     """
     Full narrative DCF (Damodaran's "Ginzu"-style build): rebuilds the
     revenue and margin paths fresh off the terminal_growth_rate passed
@@ -875,11 +935,21 @@ def enterprise_value_narrative(current_revenue, initial_growth_rate, current_mar
     (1+final_rate)**years, which would wrongly ignore every year's
     higher earlier rate.
 
+    The terminal value is reinvestment-consistent (Damodaran's Ginzu
+    does the same): it's rebuilt from the final year's NOPAT (EBIT x (1 -
+    that year's tax rate)) with reinvestment = g / return_on_new_capital,
+    rather than growing the final year's FCFF — whose reinvestment came
+    from the sales-to-capital ratio and has nothing to do with
+    perpetual growth. return_on_new_capital defaults to the (final-year)
+    discount rate; see terminal_value_consistent.
+
     Returns enterprise value (before subtracting debt / adding cash).
     """
     revenue_path = project_revenue_path(current_revenue, initial_growth_rate, terminal_growth_rate, years)
     margin_path = project_margin_path(current_margin, target_margin, years)
     fcff_path = project_fcff_narrative(revenue_path, margin_path, tax_rate, sales_to_capital_ratio, current_revenue)
+    final_tax = tax_rate[-1] if isinstance(tax_rate, list) else tax_rate
+    final_nopat = revenue_path[-1] * margin_path[-1] * (1 - final_tax)
 
     if isinstance(discount_rate, list):
         if len(discount_rate) != years:
@@ -887,7 +957,8 @@ def enterprise_value_narrative(current_revenue, initial_growth_rate, current_mar
         discounted = discount_cash_flows_variable_rate(fcff_path, discount_rate)
         pv_of_explicit_period = sum(discounted)
 
-        tv = terminal_value(fcff_path[-1], terminal_growth_rate, discount_rate[-1])
+        tv = terminal_value_consistent(final_nopat, terminal_growth_rate, discount_rate[-1],
+                                       return_on_new_capital)
         cumulative_factor = 1.0
         for r in discount_rate:
             cumulative_factor *= (1 + r)
@@ -896,7 +967,8 @@ def enterprise_value_narrative(current_revenue, initial_growth_rate, current_mar
         discounted = discount_cash_flows(fcff_path, discount_rate)
         pv_of_explicit_period = sum(discounted)
 
-        tv = terminal_value(fcff_path[-1], terminal_growth_rate, discount_rate)
+        tv = terminal_value_consistent(final_nopat, terminal_growth_rate, discount_rate,
+                                       return_on_new_capital)
         pv_of_terminal_value = tv / ((1 + discount_rate) ** years)
 
     return pv_of_explicit_period + pv_of_terminal_value
@@ -905,7 +977,8 @@ def enterprise_value_narrative(current_revenue, initial_growth_rate, current_mar
 def run_valuation_range_narrative(current_revenue, initial_growth_rate, current_margin, target_margin,
                                    tax_rate, sales_to_capital_ratio, discount_rate, terminal_growth_rate,
                                    total_debt, cash, shares_outstanding,
-                                   years=10, wacc_spread=0.01, growth_spread=0.005):
+                                   years=10, wacc_spread=0.01, growth_spread=0.005,
+                                   return_on_new_capital=None):
     """
     Same low/base/high sensitivity range as run_valuation_range_multi_stage,
     off the narrative (revenue x margin x reinvestment) build instead of
@@ -963,7 +1036,8 @@ def run_valuation_range_narrative(current_revenue, initial_growth_rate, current_
             dr, tgr = scenario
             display_rate = dr
         ev = enterprise_value_narrative(current_revenue, initial_growth_rate, current_margin, target_margin,
-                                         tax_rate, sales_to_capital_ratio, dr, tgr, years)
+                                         tax_rate, sales_to_capital_ratio, dr, tgr, years,
+                                         return_on_new_capital)
         per_share, equity_val = equity_value_per_share(ev, total_debt, cash, shares_outstanding)
         results[label] = {
             "discount_rate": display_rate,
@@ -1771,13 +1845,17 @@ if __name__ == "__main__":
     for computed, expected in zip(nol_fcff, expected_nol_fcff):
         assert abs(computed - expected) < 1e-6, "Narrative FCFF with NOL-driven tax rate mismatch!"
 
-    # Enterprise value: discount the FCFF path and add the discounted
-    # Gordon Growth terminal value off the final year, same shape as
-    # enterprise_value_multi_stage — hand-check against that same math.
+    # Enterprise value: discount the FCFF path and add the discounted,
+    # reinvestment-consistent terminal value built from final-year NOPAT:
+    #   NOPAT_4 = revenue_4 x 20% target margin x (1 - 25%)
+    #   TV = NOPAT_4 x 1.03 x (1 - 0.03 / 0.12) / (0.12 - 0.03)
+    # (return on new capital defaults to the 12% discount rate, so
+    # reinvestment is 25% of NOPAT).
     disc_rate = 0.12
     ev_narrative = enterprise_value_narrative(100, 0.40, -0.10, 0.20, 0.25, 2.0, disc_rate, 0.03, years=4)
     expected_discounted = sum(discount_cash_flows(fcff_narrative_path, disc_rate))
-    expected_tv = terminal_value(fcff_narrative_path[-1], 0.03, disc_rate) / ((1 + disc_rate) ** 4)
+    final_nopat_4 = project_revenue_path(100, 0.40, 0.03, 4)[-1] * 0.20 * 0.75
+    expected_tv = (final_nopat_4 * 1.03 * (1 - 0.03 / 0.12) / (0.12 - 0.03)) / ((1 + disc_rate) ** 4)
     print(f"Narrative EV: ${ev_narrative:,.2f}  (expected ${expected_discounted + expected_tv:,.2f})")
     assert abs(ev_narrative - (expected_discounted + expected_tv)) < 1e-6, "Narrative enterprise value mismatch!"
 
@@ -2092,5 +2170,39 @@ if __name__ == "__main__":
         "Weights must be normalized, so dollar weights give the same beta!"
     # Relevering the industry beta: 0.64 at D/E 0.5, 25% tax = 0.64*(1+0.75*0.5) = 0.88.
     assert abs(relever_beta(0.64, 0.25, 0.5) - 0.88) < 1e-12, "Relevered beta mismatch!"
+
+    # stable_growth_fcff: NOPAT 100, g 3%, RONIC 12% -> reinvest 25%:
+    #   100 x 1.03 x 0.75 = 77.25
+    stable_fcff = stable_growth_fcff(100, 0.03, 0.12)
+    print(f"Stable-growth FCFF: {stable_fcff:.4f}  (expected 77.2500)")
+    assert abs(stable_fcff - 77.25) < 1e-9, "Stable-growth FCFF mismatch!"
+    # With RONIC = discount rate (the default), TV = NOPAT x (1+g) / r, so
+    # growth that only earns its cost of capital adds (almost) nothing.
+    for g in (0.01, 0.03, 0.05):
+        tv_c = terminal_value_consistent(100, g, 0.10)
+        assert abs(tv_c - 100 * (1 + g) / 0.10) < 1e-9, \
+            "With RONIC = discount rate, TV must equal NOPAT x (1+g) / r!"
+    # A moat (RONIC above the discount rate) makes growth worth something.
+    assert terminal_value_consistent(100, 0.03, 0.10, 0.20) > terminal_value_consistent(100, 0.03, 0.10), \
+        "RONIC above the cost of capital must raise the terminal value!"
+    try:
+        terminal_value_consistent(100, 0.03, 0.10, 0.0)
+        raise AssertionError("A non-positive return on new capital must be rejected!")
+    except ValueError:
+        pass
+
+    # enterprise_value_multi_stage with base_nopat: FCFF 100, NOPAT 150,
+    # 2 yrs at 5%, no fade, g 2%, r 10%:
+    #   FCFF path [105, 110.25]; NOPAT_2 = 150 x 1.05^2 = 165.375
+    #   TV = 165.375 x 1.02 x (1 - 0.02/0.10) / 0.08 = 1686.825
+    #   EV = 105/1.1 + 110.25/1.21 + 1686.825/1.21
+    ev_consistent = enterprise_value_multi_stage(100, 0.05, 2, 0, 0.02, 0.10, base_nopat=150)
+    expected_ev_consistent = 105 / 1.1 + 110.25 / 1.21 + 1686.825 / 1.21
+    print(f"Multi-stage EV, consistent TV: {ev_consistent:.4f}  (expected {expected_ev_consistent:.4f})")
+    assert abs(ev_consistent - expected_ev_consistent) < 1e-6, "Consistent multi-stage EV mismatch!"
+    # Without base_nopat the older behavior is unchanged.
+    assert abs(enterprise_value_multi_stage(100, 0.05, 2, 0, 0.02, 0.10)
+               - (105 / 1.1 + 110.25 / 1.21 + terminal_value(110.25, 0.02, 0.10) / 1.21)) < 1e-6, \
+        "Multi-stage EV without base_nopat must keep the old terminal value!"
 
     print("\n✓ All self-tests passed. The math is internally consistent.")
