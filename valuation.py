@@ -758,6 +758,23 @@ def get_market_data(ticker):
     return beta, price
 
 
+# Short-term investments / marketable securities held alongside cash.
+# Damodaran counts cash AND marketable securities in the equity bridge —
+# cash-rich biotechs in particular park most of their money here (Viking:
+# $166M cash but another $540M in available-for-sale securities). Kept
+# out of METRIC_TAGS so companies without any don't get a spurious
+# "missing metric" warning. Freshest tag wins; the tags overlap, so only
+# one is ever used, never summed.
+SHORT_TERM_INVESTMENT_TAGS = [
+    "ShortTermInvestments",
+    "MarketableSecuritiesCurrent",
+    "AvailableForSaleSecuritiesDebtSecuritiesCurrent",
+    "AvailableForSaleSecuritiesCurrent",
+    "HeldToMaturitySecuritiesCurrent",
+    "OtherShortTermInvestments",
+]
+
+
 def parse_number(text):
     """Accept numbers typed with commas or a leading $ (e.g. '5,000,000,000'
     or '$186.72') in addition to plain digits."""
@@ -1190,6 +1207,14 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     debt_current = get_metric_value(financials, "total_debt_current", "current portion of debt", stale)
     debt_noncurrent = get_metric_value(financials, "total_debt_noncurrent", "long-term debt", stale)
     cash = get_metric_value(financials, "cash", "cash and equivalents", stale)
+    sti_val, sti_tag, sti_fy, sti_unit = freshest_annual_value(facts, SHORT_TERM_INVESTMENT_TAGS)
+    cash_fy = financials["cash"]["fiscal_year"]
+    if sti_val and cash_fy is not None and sti_fy >= cash_fy:
+        if fx_currency and sti_unit == fx_currency:
+            sti_val *= fx_rate
+        print(f"  Short-term investments: ${sti_val:,.0f} (tag: {sti_tag}, FY{sti_fy}) — added to cash,")
+        print(f"  as Damodaran does. Cash + investments: ${cash + sti_val:,.0f}")
+        cash += sti_val
     shares_out = get_metric_value(financials, "shares_outstanding", "shares outstanding", stale)
 
     total_debt = debt_current + debt_noncurrent
