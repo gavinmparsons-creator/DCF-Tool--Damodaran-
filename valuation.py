@@ -1359,6 +1359,8 @@ def print_financials_report(company_name, financials):
 
 DAMODARAN_BETAS_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/Betas.html"
 DAMODARAN_HOME_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/home.htm"
+DAMODARAN_COUNTRY_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html"
+COUNTRY_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "country_map.json")
 EDGAR_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 DAMODARAN_CACHE_PATH = os.path.join(DATA_DIR, "damodaran_cache.json")
@@ -1445,6 +1447,41 @@ def parse_damodaran_erp(page):
         return None
 
 
+def parse_damodaran_countries(page):
+    """
+    Parse Damodaran's country risk table (ctryprem.html, his January
+    update): {"updated": "January 5, 2026", "countries": {name: {"crp",
+    "erp", "tax", "rating"}}}, or None. Columns are found by header name.
+    Annotations like "Turkey (updated February 2026)" are trimmed to the
+    country name. (He also posts April/July spreadsheet updates; this
+    reads the January web table.)
+    """
+    rows = _html_table_rows(page)
+    header = next((r for r in rows if r and r[0] == "Country"), None)
+    if header is None:
+        return None
+    try:
+        i_rating = header.index("Moody's rating")
+        i_crp, i_erp = header.index("Country Risk Premium"), header.index("Equity Risk Premium")
+        i_tax = header.index("Corporate Tax Rate")
+    except ValueError:
+        return None
+    countries = {}
+    for r in rows:
+        if len(r) <= max(i_crp, i_erp, i_tax) or r[0] in ("", "Country"):
+            continue
+        name = re.sub(r"\s*\(updated [^)]*\)", "", r[0]).strip()
+        try:
+            countries[name] = {"crp": float(r[i_crp].rstrip("%")) / 100, "erp": float(r[i_erp].rstrip("%")) / 100,
+                               "tax": float(r[i_tax].rstrip("%")) / 100 if r[i_tax] not in ("", "NA") else None,
+                               "rating": r[i_rating]}
+        except ValueError:
+            continue
+    updated = re.search(r"(?i)updated:\s*([A-Za-z]+ \d{1,2}, \d{4})", page)
+    return ({"updated": updated.group(1) if updated else "unknown date", "countries": countries}
+            if "United States" in countries else None)
+
+
 def load_damodaran_data():
     """
     Industry betas and the current implied ERP, from cache when it's
@@ -1470,7 +1507,8 @@ def load_damodaran_data():
 
     changed = False
     for piece, url, parser in (("betas", DAMODARAN_BETAS_URL, parse_damodaran_betas),
-                               ("erp", DAMODARAN_HOME_URL, parse_damodaran_erp)):
+                               ("erp", DAMODARAN_HOME_URL, parse_damodaran_erp),
+                               ("countries", DAMODARAN_COUNTRY_URL, parse_damodaran_countries)):
         if is_fresh(piece):
             continue
         page = fetch_text_or_none(url)
@@ -1488,7 +1526,7 @@ def load_damodaran_data():
                 json.dump(cache, f, indent=1)
         except OSError:
             pass  # caching is a convenience; the run continues without it
-    return {piece: cache[piece]["data"] if piece in cache else None for piece in ("betas", "erp")}
+    return {piece: cache[piece]["data"] if piece in cache else None for piece in ("betas", "erp", "countries")}
 
 
 # The US Treasury's daily par yield curve, one CSV per calendar year,
@@ -1814,6 +1852,115 @@ def resolve_adr_ratio(ticker, cik, filed_shares):
         print("    counts only one share class, or the count is out of date. The share count")
         print("    below defaults to the market's ADS count x the ratio instead.")
     return ratio, market_shares, counts_disagree
+
+
+# ---------------------------------------------------------------------
+# COUNTRY RISK (Damodaran's operations-based ERP): a company earning its
+# money in a riskier country carries that country's risk whatever its
+# domicile. His country table gives each country a premium over a mature
+# market (CRP); the company's premium is the revenue-weighted average of
+# its countries' CRPs. Today's implied ERP is measured on the S&P 500,
+# which already includes the US's own CRP (0.23% since the Aa1
+# downgrade), so the adjusted ERP is
+#     implied US ERP + (weighted CRP - US CRP)
+# — a 100%-US company gets the implied ERP unchanged.
+# ---------------------------------------------------------------------
+
+def edgar_domicile(cik):
+    """The company's country per EDGAR (business address, else country of
+    incorporation), as the name EDGAR uses, or "United States" for a US
+    address. None if EDGAR doesn't say."""
+    data = fetch_json_or_none(EDGAR_SUBMISSIONS_URL.format(cik=cik)) or {}
+    business = (data.get("addresses") or {}).get("business") or {}
+    for code, description, foreign in (
+            (business.get("stateOrCountry"), business.get("stateOrCountryDescription"),
+             business.get("isForeignLocation")),
+            (data.get("stateOfIncorporation"), data.get("stateOfIncorporationDescription"), None)):
+        if not code or not code.strip():
+            continue
+        if foreign != 1 and len(code) == 2 and code.isalpha() and code.isupper() and description == code:
+            return "United States"  # US states come back as their own two-letter code
+        if description and description.strip():
+            return description.strip()
+    return None
+
+
+def pick_one_country(countries, prompt):
+    """Search Damodaran's country list by name; returns the exact name, or
+    None if the user presses Enter to stop."""
+    while True:
+        query = input(prompt).strip().lower()
+        if not query:
+            return None
+        exact = [n for n in countries if n.lower() == query]
+        matches = exact or [n for n in countries if query in n.lower()]
+        if not matches:
+            print("    No country matches that — try part of the name (e.g. china, kingdom).")
+            continue
+        if len(matches) == 1:
+            return matches[0]
+        for i, name in enumerate(matches, 1):
+            print(f"    {i:>2}. {name:<34} CRP {countries[name]['crp']:.2%}")
+        pick = input("    Number (Enter to search again): ").strip()
+        if pick.isdigit() and 1 <= int(pick) <= len(matches):
+            return matches[int(pick) - 1]
+
+
+def choose_country_mix(ticker, domicile, countries):
+    """
+    Revenue-weighted country mix for this company, [[country, weight], ...].
+    Offers the saved mix, else 100% the EDGAR domicile (a proxy, flagged as
+    such); 'mix' enters revenue shares by country from the filing's
+    geographic revenue note — Damodaran's preferred basis. An explicit
+    choice is saved per ticker in data/country_map.json; just accepting
+    the domicile proxy isn't, so a later run doesn't present the proxy as
+    a saved decision.
+    """
+    try:
+        with open(COUNTRY_MAP_PATH) as f:
+            saved_all = json.load(f)
+    except (OSError, ValueError):
+        saved_all = {}
+    saved = saved_all.get(ticker.upper())
+    if saved and all(n in countries for n, _ in saved):
+        default, label = saved, "Saved mix"
+    elif domicile in countries:
+        default, label = [[domicile, 1.0]], "Default (domicile — a proxy for where revenue is earned)"
+    else:
+        default, label = [["United States", 1.0]], (f"Default (EDGAR domicile '{domicile}' not in the table)"
+                                                   if domicile else "Default (no domicile on EDGAR)")
+    print(f"  {label}: " + " + ".join(f"{n} {w:.0%}" for n, w in default))
+    answer = input("  Press Enter to use it, type a country name, or 'mix' to enter revenue shares\n"
+                   "  by country (from the filing's geographic revenue note): ").strip()
+    if not answer:
+        chosen = default
+    elif answer.lower() == "mix":
+        print("  Add each country with its share of revenue. For a region the filing only reports")
+        print("  in aggregate (e.g. \"Europe\"), pick a representative country — itself a rough proxy.")
+        chosen = []
+        while True:
+            name = pick_one_country(countries, "    Country (Enter when done): ")
+            if name is None:
+                break
+            share = prompt_number(f"    Share of revenue for {name} (e.g. 40 for 40%): ")
+            if share > 0:
+                chosen.append([name, share / 100])
+        chosen = chosen or default
+    else:
+        exact = [n for n in countries if n.lower() == answer.lower()]
+        matches = exact or [n for n in countries if answer.lower() in n.lower()]
+        name = matches[0] if len(matches) == 1 else pick_one_country(countries, "  Search country (Enter to keep the default): ")
+        chosen = [[name, 1.0]] if name else default
+    if not answer and not saved:
+        return chosen  # accepting the domicile proxy isn't a choice worth remembering as one
+    saved_all[ticker.upper()] = chosen
+    try:
+        os.makedirs(os.path.dirname(COUNTRY_MAP_PATH), exist_ok=True)
+        with open(COUNTRY_MAP_PATH, "w") as f:
+            json.dump(saved_all, f, indent=2, sort_keys=True)
+    except OSError:
+        pass
+    return chosen
 
 
 def get_sic(cik):
@@ -2399,6 +2546,27 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         default_erp = DEFAULT_EQUITY_RISK_PREMIUM
         erp_source = "fallback default (Damodaran's ERP couldn't be loaded)"
         print(f"  Damodaran's current ERP couldn't be loaded — falling back to {default_erp:.2%}.")
+
+    # Country risk: operations-weighted CRP on top of the US implied ERP
+    # (see the COUNTRY RISK section above for the formula).
+    country_mix, country_adjustment = None, 0.0
+    if damodaran["countries"]:
+        countries = damodaran["countries"]["countries"]
+        us_crp = countries["United States"]["crp"]
+        print(f"\n  Country risk (Damodaran's country premiums, {damodaran['countries']['updated']})")
+        country_mix = choose_country_mix(ticker, edgar_domicile(cik), countries)
+        weighted_crp = model.weighted_unlevered_beta([(countries[n]["crp"], w) for n, w in country_mix])
+        for name, weight in country_mix:
+            print(f"    {name:<28} CRP {countries[name]['crp']:.2%}"
+                  + (f"  x {weight:.0%}" if len(country_mix) > 1 else ""))
+        country_adjustment = weighted_crp - us_crp
+        print(f"  Weighted CRP {weighted_crp:.2%} - US CRP {us_crp:.2%} = {country_adjustment:+.2%} "
+              f"-> ERP {default_erp:.2%} {country_adjustment:+.2%} = {default_erp + country_adjustment:.2%}")
+        if country_adjustment:
+            default_erp += country_adjustment
+            erp_source += f", {country_adjustment:+.2%} country risk"
+    else:
+        print("  (Damodaran's country premiums couldn't be loaded — no country adjustment.)")
     erp = prompt_number(f"  Press Enter to use {default_erp:.2%}, or type an ERP as a percent (e.g. 5 for 5%): ",
                         default=default_erp * 100) / 100
     if abs(erp - default_erp) > 1e-12:
