@@ -6,6 +6,7 @@ USAGE (from Terminal):
     python3 valuation.py AAPL
     python3 valuation.py MSFT --fmp-key YOUR_FMP_KEY_HERE
     python3 valuation.py VKTX --biotech --narrative   (drug pipeline rNPV + biotech defaults)
+    python3 valuation.py O --reit                     (FFO/AFFO dividend model + NAV)
 
 WHAT IT DOES:
     1. Looks up the company's CIK number from its ticker (via SEC EDGAR)
@@ -657,6 +658,52 @@ def trailing_dividend_growth_rate(facts_json, years=6):
     return series[-1]["val"], sum(growth_rates) / len(growth_rates), year_range, len(growth_rates), series[-1]["unit"]
 
 
+def freshest_annual_value(facts_json, tag_candidates):
+    """
+    Like get_latest_annual_value, but instead of taking the FIRST tag
+    in the list that has any data, checks every tag and returns the one
+    with the most recent fiscal year. Filers switch tags over time, and
+    REITs are especially prone to it — e.g. Prologis stopped using
+    DepreciationDepletionAndAmortization in FY2015 for
+    DepreciationAndAmortization, and CommonStockDividendsPerShareDeclared
+    is years stale for Prologis and Simon while ...CashPaid is current.
+    Returns (value, tag, fiscal_year, unit), all None if no tag has data.
+    """
+    best = (None, None, None, None)
+    for tag in tag_candidates:
+        val, found_tag, fy, unit = get_latest_annual_value(facts_json, [tag])
+        if val is not None and fy is not None and (best[2] is None or fy > best[2]):
+            best = (val, found_tag, fy, unit)
+    return best
+
+
+def reit_metric(facts_json, label, tag_candidates, latest_fy, fx_currency, fx_rate, default, per_share=False):
+    """
+    Pull one REIT-specific figure (freshest tag wins), show where it came
+    from, and let the user keep it or type a correction. Falls back to
+    `default` when no tag has data for the latest fiscal year — a stale
+    figure is shown for reference but not used, since a REIT's asset
+    base and payout can move a lot in two or three years.
+    """
+    val, tag, fy, unit = freshest_annual_value(facts_json, tag_candidates)
+    if val is not None and fx_currency and unit and (
+            unit == fx_currency or (per_share and unit.startswith(f"{fx_currency}/"))):
+        val *= fx_rate
+    fmt = (lambda x: f"${x:,.2f}") if per_share else (lambda x: f"${x:,.0f}")
+    if val is not None and fy is not None and fy >= latest_fy:
+        print(f"  {label}: {fmt(val)}   (tag: {tag}, FY{fy})")
+        chosen = val
+    else:
+        if val is not None:
+            print(f"  {label}: {fmt(val)} on record is STALE (tag: {tag}, FY{fy}) — not used.")
+        else:
+            print(f"  {label}: not found on EDGAR.")
+        print(f"    Using {fmt(default)} instead.")
+        chosen = default
+    override = input(f"    Press Enter to keep {fmt(chosen)}, or type a corrected amount: ").strip()
+    return parse_number(override) if override else chosen
+
+
 def get_market_data(ticker):
     """
     Try to pull beta and current share price, trying each source in turn:
@@ -952,7 +999,7 @@ def print_financials_report(company_name, financials):
     return missing, stale
 
 
-def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False):
+def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, reit=False):
     cik, company_name = get_cik_for_ticker(ticker)
     print(f"Found CIK {cik} for {company_name}")
 
@@ -1361,7 +1408,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False):
     # The FCFF DCF above will read as near-worthless (base-year FCFF
     # near zero) even though the business is healthy; the DDM below
     # values what shareholders actually receive instead. ----
-    if reinvestment_rate is not None and reinvestment_rate >= 0.80:
+    if not reit and reinvestment_rate is not None and reinvestment_rate >= 0.80:
         latest_dps, div_growth, div_years, div_n, _dps_unit = trailing_dividend_growth_rate(facts)
         # A per-share unit is compound (e.g. "CNY/shares"), not a bare
         # currency code, so it can't be compared to fx_currency with
@@ -1392,6 +1439,150 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False):
         else:
             print("  This company doesn't pay a dividend at all, so there's nothing for a DDM")
             print("  to value either — neither cash-flow framework fits well here.")
+
+    # ---- REIT mode (--reit): a REIT must pay out 90%+ of taxable income,
+    # so its dividend IS roughly its free cash flow to equity and the DDM
+    # is the primary valuation, not a fallback. Replaces the auto-DDM
+    # block above with Damodaran's REIT fixes: FFO/AFFO instead of
+    # depreciation-depressed net income, growth from fundamentals
+    # (retention x ROE) instead of historical dividend growth that was
+    # mostly funded by issuing new shares, and a NAV (NOI / cap rate)
+    # cross-check. See model.py's REIT section. ----
+    if reit:
+        print(f"\n{'='*60}")
+        print("  REIT valuation (FFO / AFFO, fundamental growth, NAV)")
+        print(f"{'='*60}")
+        latest_fy = max(info["fiscal_year"] for info in financials.values() if info["fiscal_year"] is not None)
+        reit_args = (latest_fy, fx_currency, fx_rate)
+        net_income = reit_metric(facts, "Net income to common", [
+            "NetIncomeLossAvailableToCommonStockholdersBasic", "NetIncomeLoss"], *reit_args, default=0.0)
+        re_depreciation = reit_metric(facts, "Real estate depreciation & amortization", [
+            "DepreciationAndAmortization", "DepreciationDepletionAndAmortization",
+            "DepreciationAmortizationAndAccretionNet"], *reit_args, default=latest_d_and_a)
+        gains_on_sale = reit_metric(facts, "Gains on property sales", [
+            "GainLossOnSaleOfProperties", "GainsLossesOnSalesOfInvestmentRealEstate",
+            "GainLossOnSaleOfRealEstateInvestmentProperty", "GainLossOnDispositionOfAssets"],
+            *reit_args, default=0.0)
+        impairments = reit_metric(facts, "Real estate impairments", ["ImpairmentOfRealEstate"],
+                                  *reit_args, default=0.0)
+        # Maintenance capex is the weakest number here: few REITs tag it
+        # separately from growth capex, and companies define it differently
+        # (the supplemental package's AFFO reconciliation is the real
+        # source). 10% of depreciation is a rough placeholder only.
+        print("  Maintenance capex: recurring spend to keep existing buildings leased. Most")
+        print("  REITs report it only in their supplemental package's AFFO reconciliation —")
+        print("  check there; the default below is a rough placeholder.")
+        maintenance_capex = reit_metric(facts, "Maintenance capex", ["PaymentsForCapitalImprovements"],
+                                        *reit_args, default=0.10 * re_depreciation)
+        dps = reit_metric(facts, "Dividend per share", [
+            "CommonStockDividendsPerShareCashPaid", "CommonStockDividendsPerShareDeclared"],
+            *reit_args, default=0.0, per_share=True)
+        preferred = reit_metric(facts, "Preferred equity", ["PreferredStockValue"], *reit_args, default=0.0)
+        # Some REITs (e.g. Realty Income) don't tag operating income at all;
+        # rebuild it from net income + interest - gains (REITs pay ~no tax).
+        operating_income = reit_metric(facts, "Operating income", ["OperatingIncomeLoss"], *reit_args,
+                                       default=net_income + (latest_interest_expense or 0.0) - gains_on_sale)
+
+        ffo = model.compute_ffo(net_income, re_depreciation, gains_on_sale, impairments)
+        affo = model.compute_affo(ffo, maintenance_capex)
+        dividends = dps * shares_out
+        print(f"\n  FFO:   ${ffo:>16,.0f}   (${ffo / shares_out:,.2f}/share, "
+              f"price/FFO {share_price / (ffo / shares_out):.1f}x)" if ffo > 0 else f"\n  FFO:   ${ffo:>16,.0f}")
+        print(f"  AFFO:  ${affo:>16,.0f}   (${affo / shares_out:,.2f}/share, "
+              f"price/AFFO {share_price / (affo / shares_out):.1f}x)" if affo > 0 else f"  AFFO:  ${affo:>16,.0f}")
+        print(f"  Dividends: ${dividends:,.0f}   (${dps:,.2f}/share, yield {dps / share_price:.2%})")
+
+        # ---- Growth: fundamentals first, history for reference only ----
+        fundamental = None
+        if affo > 0 and book_equity > 0:
+            fundamental = model.reit_fundamental_growth(dividends, affo, book_equity)
+            print(f"\n  Payout of AFFO: {fundamental['payout_ratio']:.0%}   Retention: "
+                  f"{fundamental['retention_ratio']:.0%}   AFFO / book equity: {fundamental['roe']:.2%}")
+            print(f"  Fundamental growth (retention x ROE): {fundamental['growth']:.2%}")
+            if fundamental["payout_ratio"] > 1:
+                print("  ⚠ The dividend exceeds AFFO — it's being funded by asset sales, new debt or")
+                print("    new shares, not by the buildings. Expect a cut or slower growth.")
+        else:
+            print("\n  Can't compute fundamental growth (AFFO or book equity isn't positive).")
+        # Historical growth off the SAME fresh dividend tag used above, not
+        # trailing_dividend_growth_rate's Declared-first list — that tag is
+        # stale and garbled for some REITs (Prologis: $0.03, showing 50%/yr).
+        _dps_val, dps_tag, _dps_fy, _dps_unit = freshest_annual_value(facts, [
+            "CommonStockDividendsPerShareCashPaid", "CommonStockDividendsPerShareDeclared"])
+        dps_series = get_annual_series(facts, [dps_tag], years=6) if dps_tag else []
+        hist_growth = model.share_count_growth_rate([e["val"] for e in dps_series])  # same CAGR math
+        if hist_growth is not None:
+            print(f"  Historical dividend growth: {hist_growth:.2%}/yr (FY{dps_series[0]['fiscal_year']}-"
+                  f"FY{dps_series[-1]['fiscal_year']}) — reference only: REITs grow")
+            print("  mostly by issuing shares, so this can overstate per-share growth.")
+        share_series = get_annual_series(facts, ["WeightedAverageNumberOfDilutedSharesOutstanding"], years=6)
+        dilution = model.share_count_growth_rate([e["val"] for e in share_series])
+        if dilution is not None:
+            span = f"FY{share_series[0]['fiscal_year']}-FY{share_series[-1]['fiscal_year']}"
+            print(f"  Diluted share count growth: {dilution:.2%}/yr ({span})" +
+                  ("  ⚠ heavy issuance — headline growth is" if dilution > 0.05 else ""))
+            if dilution > 0.05:
+                print("    largely the company getting bigger, not each share earning more.")
+        default_growth = fundamental["growth"] if fundamental else terminal_growth
+        if fundamental and fundamental["roe"] > 0.25:
+            # Years of dividends above net income (normal for a REIT, since
+            # depreciation depresses net income) can shrink book equity to a
+            # sliver — e.g. Simon showed 113% "ROE" — making retention x ROE
+            # meaningless.
+            print(f"  ⚠ AFFO / book equity of {fundamental['roe']:.0%} isn't a meaningful return: book")
+            print("    equity has been shrunk by years of payouts above net income. Defaulting")
+            print("    growth to the terminal rate instead; set your own below.")
+            default_growth = terminal_growth
+        growth_input = input(f"  Dividend growth rate for the DDM (e.g. 3 for 3%; Enter for "
+                             f"{default_growth:.2%}): ").strip()
+        reit_growth = parse_number(growth_input) / 100 if growth_input else default_growth
+
+        if dps > 0:
+            ddm_results = model.run_dividend_discount_range(
+                dps, reit_growth, high_growth_years, fade_years, coe, terminal_growth)
+            print(f"\n  Dividend discount model (cost of equity {coe:.2%}, {high_growth_years} yrs at "
+                  f"{reit_growth:.2%}, {fade_years}-yr fade to {terminal_growth:.2%}):")
+            for label in ("low", "base", "high"):
+                r = ddm_results[label]
+                print(f"    {label.upper():5s}: ${r['value_per_share']:>10,.2f} per share   "
+                      f"(cost of equity={r['cost_of_equity']:.2%}, terminal growth={r['terminal_growth_rate']:.2%})")
+        else:
+            print("\n  No dividend per share to discount — skipping the DDM.")
+
+        # ---- NAV cross-check: value the buildings directly ----
+        estimated_noi = operating_income + re_depreciation + impairments
+        print(f"\n  NAV cross-check (net operating income / cap rate)")
+        print(f"  Estimated NOI (operating income + D&A + impairments): ${estimated_noi:,.0f}")
+        print("  This includes corporate overhead, so it runs a bit below the property-level")
+        print("  NOI in the supplemental package — use that figure if you have it.")
+        noi_input = input("  Press Enter to keep it, or type the reported NOI: ").strip()
+        noi = parse_number(noi_input) if noi_input else estimated_noi
+        # Re-pull debt with freshest-tag-wins: the general debt lookup takes
+        # the first tag with any data, and REITs often switch to tags it
+        # doesn't check (Realty Income: a FY2016 LongTermDebt of $4.0B vs a
+        # current NotesPayable of $25B). Debt is a big share of a REIT's
+        # capital, so a stale figure swings NAV hard.
+        print("  Total debt: notes + mortgages + term loans + credit line — check the balance")
+        print("  sheet if the figure below looks low.")
+        reit_debt = reit_metric(facts, "Total debt", [
+            "LongTermDebt", "LongTermDebtNoncurrent", "DebtLongtermAndShorttermCombinedAmount",
+            "NotesPayable"], *reit_args, default=total_debt)
+        implied_enterprise = market_cap + reit_debt + preferred - cash
+        if implied_enterprise > 0 and noi > 0:
+            print(f"  Market-implied cap rate (NOI / (market cap + debt + preferred - cash)): "
+                  f"{noi / implied_enterprise:.2%}")
+        print("  Typical cap rates vary by property type: ~4.5-5.5% industrial/data centers,")
+        print("  ~5-6% apartments, ~6-7% net lease, ~6.5-8% retail/office. Check recent")
+        print("  transactions for this REIT's sector.")
+        cap_input = input("  Cap rate (e.g. 6.5 for 6.5%; Enter for 6.5%): ").strip()
+        cap_rate = parse_number(cap_input) / 100 if cap_input else 0.065
+        nav = model.reit_nav_per_share(noi, cap_rate, cash, reit_debt, preferred, shares_out)
+        premium = share_price / nav["nav_per_share"] - 1 if nav["nav_per_share"] > 0 else None
+        print(f"  Property value: ${nav['property_value']:,.0f}   + cash ${cash:,.0f}   - debt ${reit_debt:,.0f}"
+              f"   - preferred ${preferred:,.0f}")
+        print(f"  NAV: ${nav['nav']:,.0f}")
+        print(f"  NAV per share: ${nav['nav_per_share']:,.2f}   vs current price ${share_price:,.2f}" +
+              (f"  ({premium:+.0%} {'premium' if premium >= 0 else 'discount'} to NAV)" if premium is not None else ""))
 
     print(f"\n{'='*60}")
     print("  Assumptions used")
@@ -1854,6 +2045,13 @@ if __name__ == "__main__":
              "with a patent-as-option cross-check), and with --narrative sets the "
              "failure probability from the lead drug's clinical phase.",
     )
+    parser.add_argument(
+        "--reit", action="store_true",
+        help="REIT mode: always runs the dividend discount model, with FFO/AFFO in place "
+             "of net income, growth from fundamentals (AFFO retention x ROE) instead of "
+             "historical dividend growth, a share-dilution check, and a NAV (NOI / cap "
+             "rate) cross-check.",
+    )
     args = parser.parse_args()
 
-    run_full_valuation(args.ticker, args.stage, args.narrative, args.biotech)
+    run_full_valuation(args.ticker, args.stage, args.narrative, args.biotech, args.reit)
