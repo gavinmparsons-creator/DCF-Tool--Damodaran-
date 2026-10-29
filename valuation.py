@@ -48,6 +48,8 @@ NOTES:
 
 import os
 import re
+import csv
+import io
 import sys
 import html
 import json
@@ -91,7 +93,7 @@ EDGAR_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 FMP_PROFILE_URL = "https://financialmodelingprep.com/api/v3/profile/{ticker}?apikey={key}"
 
 # Reasonable defaults used if you don't override them at the prompt.
-DEFAULT_RISK_FREE_RATE = 0.045   # ~10-year Treasury yield, adjust as needed
+DEFAULT_RISK_FREE_RATE = 0.045   # fallback only — normally today's 10-year Treasury yield (see load_risk_free_rate)
 DEFAULT_EQUITY_RISK_PREMIUM = 0.055  # fallback only — normally Damodaran's current implied ERP (see load_damodaran_data)
 DEFAULT_MARGINAL_TAX_RATE = 0.25    # US federal + state statutory, for relevering betas (Damodaran relevers at the marginal rate)
 DEFAULT_TERMINAL_GROWTH = 0.025  # roughly long-run GDP growth
@@ -1360,6 +1362,71 @@ def load_damodaran_data():
     return {piece: cache[piece]["data"] if piece in cache else None for piece in ("betas", "erp")}
 
 
+# The US Treasury's daily par yield curve, one CSV per calendar year,
+# newest day first — official, free, no API key.
+TREASURY_YIELD_URL = ("https://home.treasury.gov/resource-center/data-chart-center/interest-rates/"
+                      "daily-treasury-rates.csv/{year}/all?type=daily_treasury_yield_curve"
+                      "&field_tdr_date_value={year}&page&_format=csv")
+RISK_FREE_CACHE_MAX_AGE_HOURS = 24
+
+
+def parse_treasury_10yr(csv_text):
+    """The most recent 10-year yield in a Treasury yield-curve CSV, as
+    {"rate": 0.0505, "as_of": "10/28/2026"}, or None. Rows are newest
+    first, but the max date is taken anyway rather than trusting order."""
+    try:
+        rows = [r for r in csv.DictReader(io.StringIO(csv_text)) if r.get("10 Yr") and r.get("Date")]
+        latest = max(rows, key=lambda r: datetime.strptime(r["Date"], "%m/%d/%Y"))
+        return {"rate": float(latest["10 Yr"]) / 100, "as_of": latest["Date"]}
+    except (ValueError, KeyError):
+        return None
+
+
+def load_risk_free_rate():
+    """
+    Today's 10-year Treasury yield — Damodaran's risk-free rate for a US
+    dollar valuation, and the same rate he measures his implied ERP
+    against, so the two stay consistent. Cached (in the same file as his
+    data) for a day; a failed fetch falls back to the cached yield, and
+    with no cache at all returns None so the caller uses
+    DEFAULT_RISK_FREE_RATE. Early January, before the new year has any
+    data, falls back to last year's file.
+    """
+    cache = {}
+    try:
+        with open(DAMODARAN_CACHE_PATH) as f:
+            cache = json.load(f)
+    except (OSError, ValueError):
+        pass
+    now = datetime.now(timezone.utc)
+    cached = cache.get("riskfree")
+    try:
+        if cached and (now - datetime.fromisoformat(cached["fetched"])).total_seconds() < \
+                RISK_FREE_CACHE_MAX_AGE_HOURS * 3600:
+            return cached["data"]
+    except (KeyError, ValueError, TypeError):
+        pass
+    parsed = None
+    for year in (now.year, now.year - 1):
+        page = fetch_text_or_none(TREASURY_YIELD_URL.format(year=year))
+        parsed = parse_treasury_10yr(page) if page else None
+        if parsed:
+            break
+    if parsed:
+        cache["riskfree"] = {"fetched": now.isoformat(), "data": parsed}
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with open(DAMODARAN_CACHE_PATH, "w") as f:
+                json.dump(cache, f, indent=1)
+        except OSError:
+            pass
+        return parsed
+    if cached:
+        print(f"  (Couldn't refresh the Treasury yield — using the copy cached {cached['fetched'][:10]}.)")
+        return cached["data"]
+    return None
+
+
 # SEC industry (SIC) code ranges -> Damodaran industry, checked in order,
 # FIRST match wins — so narrow codes are listed before the broad range
 # they sit inside. Only a SUGGESTION: SIC codes are old and coarse (Viking,
@@ -1932,6 +1999,29 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
                 beta_source = f"industry: {industry_label}, unlevered {unlevered:.2f}, relevered"
     print(f"  Using beta: {beta:.2f}")
 
+    # ---- Risk-free rate: today's 10-year Treasury yield, not a fixed
+    # number — and the same rate Damodaran's implied ERP below is measured
+    # against, so the two move together. ----
+    print(f"\n{'='*60}")
+    print("  Risk-free rate")
+    print(f"{'='*60}")
+    treasury = load_risk_free_rate()
+    if treasury:
+        default_rf = treasury["rate"]
+        risk_free_source = f"10-year Treasury, {treasury['as_of']}"
+        print(f"  10-year Treasury yield on {treasury['as_of']}: {default_rf:.2%}  (US Treasury daily yield curve)")
+    else:
+        default_rf = DEFAULT_RISK_FREE_RATE
+        risk_free_source = "fallback default (Treasury yield couldn't be loaded)"
+        print(f"  The Treasury yield couldn't be loaded — falling back to {default_rf:.2%}.")
+    if fx_currency:
+        print(f"  Note: this is a US-dollar risk-free rate; the financials were converted from {fx_currency}")
+        print("  to USD above, so the dollar rate is the consistent one.")
+    risk_free_rate = prompt_number(f"  Press Enter to use {default_rf:.2%}, or type a rate as a percent "
+                                   "(e.g. 4.5 for 4.5%): ", default=default_rf * 100) / 100
+    if abs(risk_free_rate - default_rf) > 1e-12:
+        risk_free_source = "typed"
+
     # ---- Equity risk premium: Damodaran's current implied ERP (what the
     # S&P 500's price implies investors expect over the risk-free rate,
     # updated monthly) rather than a fixed long-run number. ----
@@ -1942,8 +2032,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         default_erp = damodaran["erp"]["erp"]
         erp_source = f"Damodaran implied ERP, {damodaran['erp']['as_of']}"
         print(f"  Damodaran's implied ERP on {damodaran['erp']['as_of']}: {default_erp:.2%}")
-        print(f"  (He estimates it against the 10-year Treasury yield; this run's risk-free rate is")
-        print(f"  {DEFAULT_RISK_FREE_RATE:.2%} — keep the two consistent.)")
+        print(f"  (Measured against the 10-year Treasury yield — the risk-free rate above.)")
     else:
         default_erp = DEFAULT_EQUITY_RISK_PREMIUM
         erp_source = "fallback default (Damodaran's ERP couldn't be loaded)"
@@ -1955,7 +2044,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
 
     # Computed here (rather than down with WACC) because the dividend
     # discount model below needs cost of equity too, before WACC exists.
-    coe = model.cost_of_equity(DEFAULT_RISK_FREE_RATE, beta, erp)
+    coe = model.cost_of_equity(risk_free_rate, beta, erp)
 
     # ---- Reinvestment-rate-derived growth (Damodaran fundamental growth) ----
     # NOTE: change in net working capital defaults to 0 here, same simplification
@@ -2021,7 +2110,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     synthetic_cod, interest_coverage, synthetic_rating, default_spread = None, None, None, None
     if latest_interest_expense:
         synthetic_cod, interest_coverage, synthetic_rating, default_spread = model.synthetic_cost_of_debt(
-            ebit, latest_interest_expense, DEFAULT_RISK_FREE_RATE, large_firm=is_large_firm)
+            ebit, latest_interest_expense, risk_free_rate, large_firm=is_large_firm)
 
     print(f"\n{'='*60}")
     print("  Synthetic credit rating (cost of debt)")
@@ -2033,7 +2122,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
               f"({'large' if is_large_firm else 'small'}-firm table, market cap ${market_cap:,.0f})")
         print(f"  Default spread:          {default_spread:.2%}  over the risk-free rate")
         print(f"  Synthetic cost of debt:  {synthetic_cod:.2%}  "
-              f"({DEFAULT_RISK_FREE_RATE:.2%} risk-free + {default_spread:.2%} spread)")
+              f"({risk_free_rate:.2%} risk-free + {default_spread:.2%} spread)")
         print("  Spread values are illustrative (Damodaran republishes current spreads")
         print("  periodically as credit markets move) — override below with the company's")
         print("  actual bond yield if you have one, for precision.")
@@ -2301,6 +2390,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     print(f"{'='*60}")
     print(f"  Effective tax rate:        {effective_tax_rate:.2%}")
     print(f"  Beta:                      {beta:.2f}  ({beta_source})")
+    print(f"  Risk-free rate:            {risk_free_rate:.2%}  ({risk_free_source})")
     print(f"  Equity risk premium:       {erp:.2%}  ({erp_source})")
     print(f"  Cost of equity (CAPM):     {coe:.2%}")
     print(f"  WACC (discount rate):      {discount_rate:.2%}")
@@ -2505,7 +2595,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
                 if r["pv_commercial"] > 0 and r["pv_dev_cost"] > 0:
                     option = model.patent_option_value(r["pv_commercial"], r["pv_dev_cost"],
                                                        d["exclusivity_years"], drug_volatility,
-                                                       DEFAULT_RISK_FREE_RATE)
+                                                       risk_free_rate)
                     option_display = f"{option['value'] * r['probability_of_approval']:>16,.0f}"
                 else:
                     option_display = f"{'n/a':>16}"  # option model needs a positive cost and value
