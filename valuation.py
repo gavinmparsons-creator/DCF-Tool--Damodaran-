@@ -930,8 +930,8 @@ def get_market_data(ticker):
 
     # Manual fallback
     print(f"  Look up '{ticker.upper()}' on Yahoo Finance or Google Finance for these:")
-    beta = parse_number(input("  Enter beta (e.g. 1.2): "))
-    price = parse_number(input("  Enter current share price (e.g. 185.50): "))
+    beta = prompt_number("  Enter beta (e.g. 1.2): ")
+    price = prompt_number("  Enter current share price (e.g. 185.50): ")
     return beta, price
 
 
@@ -1052,7 +1052,7 @@ def get_fx_rate_to_usd(currency):
     except Exception:
         pass
     print(f"  Could not fetch a live {currency}->USD exchange rate.")
-    rate = parse_number(input(f"  Enter the {currency}->USD exchange rate manually (e.g. 1.16): "))
+    rate = prompt_number(f"  Enter the {currency}->USD exchange rate manually (e.g. 1.16): ")
     return rate, None
 
 
@@ -1246,6 +1246,7 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 DAMODARAN_CACHE_PATH = os.path.join(DATA_DIR, "damodaran_cache.json")
 INDUSTRY_MAP_PATH = os.path.join(DATA_DIR, "industry_map.json")
 DAMODARAN_CACHE_MAX_AGE_DAYS = 7
+DAMODARAN_CACHE_VERSION = 2  # bump when the parsed shape changes, so old caches refresh
 
 
 def fetch_text_or_none(url):
@@ -1286,6 +1287,10 @@ def parse_damodaran_betas(page):
         i_unlev, i_cash = col("Unlevered beta"), col("Unlevered beta corrected for cash")
     except StopIteration:
         return None
+    try:
+        i_sd = col("Standard deviation of equity")
+    except StopIteration:
+        i_sd = None  # optional: only used as a default option volatility
     industries = {}
     for r in rows:
         if len(r) <= max(i_firms, i_beta, i_de, i_unlev, i_cash) or r[0] == "Industry Name":
@@ -1296,6 +1301,8 @@ def parse_damodaran_betas(page):
                 "de_ratio": float(r[i_de].rstrip("%")) / 100,
                 "unlevered_beta": float(r[i_unlev]), "unlevered_beta_cash": float(r[i_cash]),
             }
+            if i_sd is not None and len(r) > i_sd:
+                industries[r[0]]["stdev_equity"] = float(r[i_sd].rstrip("%")) / 100
         except ValueError:
             continue
     updated = re.search(r"(?i)Updated in ([A-Za-z]+ \d{4})", page)
@@ -1338,7 +1345,8 @@ def load_damodaran_data():
     def is_fresh(piece):
         try:
             fetched = datetime.fromisoformat(cache[piece]["fetched"])
-            return (now - fetched).days < DAMODARAN_CACHE_MAX_AGE_DAYS
+            return ((now - fetched).days < DAMODARAN_CACHE_MAX_AGE_DAYS
+                    and cache[piece].get("version") == DAMODARAN_CACHE_VERSION)
         except (KeyError, ValueError, TypeError):
             return False
 
@@ -1350,7 +1358,7 @@ def load_damodaran_data():
         page = fetch_text_or_none(url)
         parsed = parser(page) if page else None
         if parsed:
-            cache[piece] = {"fetched": now.isoformat(), "data": parsed}
+            cache[piece] = {"fetched": now.isoformat(), "data": parsed, "version": DAMODARAN_CACHE_VERSION}
             changed = True
         elif piece in cache:
             print(f"  (Couldn't refresh Damodaran's {piece} — using the copy cached "
@@ -1996,6 +2004,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     print(f"  Company's D/E (debt/market cap):    {debt_to_equity:.2f}")
     beta_source = "regression beta (as pulled)"
     industry_beta = None
+    industry_equity_vol = None  # weighted std dev of equity for the chosen industries — default option volatility
     if damodaran["betas"]:
         industries = damodaran["betas"]["industries"]
         if fx_currency:
@@ -2015,6 +2024,9 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
                   f"{DEFAULT_MARGINAL_TAX_RATE:.0%} marginal tax: {industry_beta:.2f}")
             print(f"  (Damodaran's US industry betas, updated {damodaran['betas']['updated']})")
             industry_label = " + ".join(name for name, _ in mix)
+            if all("stdev_equity" in industries[name] for name, _ in mix):
+                industry_equity_vol = model.weighted_unlevered_beta(
+                    [(industries[name]["stdev_equity"], weight) for name, weight in mix])
     else:
         print("  Damodaran's industry betas couldn't be loaded (no connection and no cache).")
 
@@ -2473,6 +2485,100 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         print(f"  NAV per share: ${nav['nav_per_share']:,.2f}   vs current price ${share_price:,.2f}" +
               (f"  ({premium:+.0%} {'premium' if premium >= 0 else 'discount'} to NAV)" if premium is not None else ""))
 
+    # ---- Equity bridge (Damodaran): the DCF values the OPERATING business;
+    # getting from there to value per share means subtracting every other
+    # claim on it and adding every non-operating asset it doesn't count:
+    #   - debt (incl. operating leases, above)
+    #   - minority interests: the slice of consolidated subsidiaries owned
+    #     by outsiders, whose cash flows ARE in the consolidated DCF
+    #   - preferred stock
+    #   - unfunded pensions, after tax (a debt-like promise, tax-deductible
+    #     when paid)
+    #   - employee stock options outstanding, valued as options (Black-
+    #     Scholes) — not added to the share count, which ignores the
+    #     exercise price holders pay
+    #   + cash and short-term investments (above)
+    #   + equity-method stakes in other companies, whose earnings sit
+    #     below operating income and so are outside the DCF
+    # Restricted stock units and other dilution are added to the share
+    # count, estimated as diluted minus basic shares less the in-the-money
+    # options already valued (EDGAR doesn't carry current RSU counts —
+    # they're reported per award type, which companyfacts leaves out).
+    # Book values stand in for market values on minority interests and
+    # equity stakes. Each item is shown and can be edited. ----
+    def current_value(tags):
+        val, tag, fy, unit = freshest_annual_value(facts, tags)
+        if val is None or fy is None or fy < latest_fy_all:
+            return 0.0, None
+        if fx_currency and unit == fx_currency:
+            val *= fx_rate
+        return val, tag
+
+    minority_interest, _ = current_value(["MinorityInterest"])
+    bridge_preferred, _ = current_value(["PreferredStockValue"])
+    pension_liability, _ = current_value(["DefinedBenefitPensionPlanLiabilitiesNoncurrent",
+                                          "PensionAndOtherPostretirementDefinedBenefitPlansLiabilitiesNoncurrent",
+                                          "LiabilityDefinedBenefitPlanNoncurrent"])
+    equity_investments, _ = current_value(["EquityMethodInvestments"])
+    options_outstanding, _ = current_value(
+        ["ShareBasedCompensationArrangementByShareBasedPaymentAwardOptionsOutstandingNumber"])
+    option_strike, _ = current_value(
+        ["ShareBasedCompensationArrangementByShareBasedPaymentAwardOptionsOutstandingWeightedAverageExercisePrice"])
+    diluted_shares, _ = current_value(["WeightedAverageNumberOfDilutedSharesOutstanding"])
+    basic_shares, _ = current_value(["WeightedAverageNumberOfSharesOutstandingBasic"])
+
+    option_volatility = industry_equity_vol or 0.40
+    option_years = 5.0  # weighted remaining term isn't in companyfacts; employee options typically run ~4-6 yrs
+    option_value, tsm_option_shares = 0.0, 0.0
+    if options_outstanding > 0 and option_strike > 0:
+        option_value = options_outstanding * model.black_scholes_call(
+            share_price, option_strike, option_years, option_volatility, risk_free_rate)
+        tsm_option_shares = options_outstanding * max(0.0, share_price - option_strike) / share_price
+    other_dilution_shares = (max(0.0, diluted_shares - basic_shares - tsm_option_shares)
+                             if diluted_shares and basic_shares else 0.0)
+
+    def show_bridge():
+        print(f"  - Debt (incl. operating leases):          ${total_debt:>18,.0f}")
+        print(f"  - Minority interests (book):              ${minority_interest:>18,.0f}")
+        print(f"  - Preferred stock:                        ${bridge_preferred:>18,.0f}")
+        print(f"  - Unfunded pensions (x {1 - DEFAULT_MARGINAL_TAX_RATE:.0%} after tax):     "
+              f"${pension_liability * (1 - DEFAULT_MARGINAL_TAX_RATE):>18,.0f}")
+        print(f"  - Employee options outstanding:           ${option_value:>18,.0f}" +
+              (f"   ({options_outstanding:,.0f} @ ${option_strike:,.2f}, {option_volatility:.0%} vol, "
+               f"{option_years:.0f} yrs)" if option_value else ""))
+        print(f"  + Cash and short-term investments:        ${cash:>18,.0f}")
+        print(f"  + Equity-method investments (book):       ${equity_investments:>18,.0f}")
+        print(f"  Shares: {shares_out:,.0f} basic + {other_dilution_shares:,.0f} RSUs/other dilution "
+              f"= {shares_out + other_dilution_shares:,.0f}")
+
+    print(f"\n{'='*60}")
+    print("  Equity bridge (operating value -> value per share)")
+    print(f"{'='*60}")
+    show_bridge()
+    if diluted_shares and diluted_shares <= basic_shares:
+        print("  (Diluted = basic shares: usual for a loss-making year, when dilution is excluded")
+        print("  as anti-dilutive — RSUs may be missing; enter a count below if you know it.)")
+    if input("  Press Enter to accept, or type e to edit each item: ").strip().lower() == "e":
+        minority_interest = prompt_number(f"    Minority interests (Enter for ${minority_interest:,.0f}): ",
+                                          default=minority_interest)
+        bridge_preferred = prompt_number(f"    Preferred stock (Enter for ${bridge_preferred:,.0f}): ",
+                                         default=bridge_preferred)
+        pension_liability = prompt_number(f"    Unfunded pension, before tax (Enter for ${pension_liability:,.0f}): ",
+                                          default=pension_liability)
+        option_value = prompt_number(f"    Value of employee options (Enter for ${option_value:,.0f}): ",
+                                     default=option_value)
+        equity_investments = prompt_number(f"    Equity-method investments (Enter for ${equity_investments:,.0f}): ",
+                                           default=equity_investments)
+        other_dilution_shares = prompt_number(f"    RSUs/other dilutive shares (Enter for {other_dilution_shares:,.0f}): ",
+                                              default=other_dilution_shares)
+        show_bridge()
+    # What the per-share math subtracts and adds; total_debt itself stays
+    # pure debt, since that's what belongs in D/E and WACC.
+    bridge_debt = (total_debt + minority_interest + bridge_preferred
+                   + pension_liability * (1 - DEFAULT_MARGINAL_TAX_RATE) + option_value)
+    bridge_cash = cash + equity_investments
+    value_shares = shares_out + other_dilution_shares
+
     print(f"\n{'='*60}")
     print("  Assumptions used")
     print(f"{'='*60}")
@@ -2490,6 +2596,9 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     if lease_liability:
         print(f"  Operating leases:          ${lease_liability:,.0f} added to debt, "
               f"${lease_interest:,.0f} added back to EBIT")
+    print(f"  Equity bridge:             claims beyond debt ${bridge_debt - total_debt:,.0f}, "
+          f"non-operating assets beyond cash ${equity_investments:,.0f}, "
+          f"{other_dilution_shares:,.0f} extra shares")
     if rd_result is not None:
         print(f"  R&D capitalized:           EBIT {rd_result['ebit_adjustment']:+,.0f}, "
               f"invested capital +${rd_result['research_asset']:,.0f} (see above)")
@@ -2501,9 +2610,9 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         fade_years=fade_years,
         discount_rate=discount_rate,
         terminal_growth_rate=terminal_growth,
-        total_debt=total_debt,
-        cash=cash,
-        shares_outstanding=shares_out,
+        total_debt=bridge_debt,
+        cash=bridge_cash,
+        shares_outstanding=value_shares,
         base_nopat=terminal_nopat_basis,
         return_on_new_capital=return_on_new_capital,
     )
@@ -2553,7 +2662,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     if fcff > 0:
         implied_growth = model.solve_implied_growth_rate(
             share_price, fcff, high_growth_years, fade_years,
-            discount_rate, terminal_growth, total_debt, cash, shares_out,
+            discount_rate, terminal_growth, bridge_debt, bridge_cash, value_shares,
             base_nopat=terminal_nopat_basis, return_on_new_capital=return_on_new_capital)
         print(f"\n{'='*60}")
         print("  Market-implied growth rate")
@@ -2580,14 +2689,15 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     # cross-check on what the market is actually paying for, alongside
     # the DCF-based growth-rate read above. Not a comp-based "fair"
     # multiple, just what today's price backs out to. ----
-    implied_ev = market_cap + total_debt - cash
+    implied_ev = market_cap + bridge_debt - bridge_cash
     implied_multiple = implied_ev / revenue if revenue else None
     if implied_multiple is not None:
         print(f"\n{'='*60}")
         print("  Market-implied EV/Revenue multiple")
         print(f"{'='*60}")
         print(f"  The current price (${share_price:,.2f}) implies an EV of ${implied_ev:,.0f}")
-        print(f"  (market cap ${market_cap:,.0f} + debt ${total_debt:,.0f} - cash ${cash:,.0f}),")
+        print(f"  (market cap ${market_cap:,.0f} + debt and other claims ${bridge_debt:,.0f} - cash and "
+              f"investments ${bridge_cash:,.0f}),")
         print(f"  i.e. the market is pricing this at {implied_multiple:.2f}x revenue (${revenue:,.0f}).")
         print("  For context, look up 2-3 direct peers' EV/Revenue — is that multiple rich,")
         print("  cheap, or in line for this kind of business?")
@@ -2616,7 +2726,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         if multiple_input:
             multiple = parse_number(multiple_input)
             rev_value_per_share, rev_equity_value = model.ev_revenue_valuation(
-                revenue, multiple, total_debt, cash, shares_out)
+                revenue, multiple, bridge_debt, bridge_cash, value_shares)
             print(f"  EV ({multiple:g}x revenue): ${revenue * multiple:,.0f}   "
                   f"Equity value: ${rev_equity_value:,.0f}   "
                   f"Per share: ${rev_value_per_share:,.2f}")
@@ -2664,7 +2774,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
             default_prob = model.PHASE_APPROVAL_PROBABILITY[phase]
             prob_input = input(f"    P(approval) (e.g. 30 for 30%; Enter for {default_prob:.1%}): ").strip()
             prob_approval = parse_number(prob_input) / 100 if prob_input else default_prob
-            peak_sales = parse_number(input("    Peak annual sales in dollars (e.g. 1500000000): "))
+            peak_sales = prompt_number("    Peak annual sales in dollars (e.g. 1500000000): ")
             default_years = PHASE_DEFAULT_YEARS_TO_LAUNCH[phase]
             ytl_input = input(f"    Years until launch (Enter for {default_years}): ").strip()
             years_to_launch = int(parse_number(ytl_input)) if ytl_input else default_years
@@ -2697,10 +2807,11 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
                 print(f"  {d['name'][:16]:<16} {d['phase']:<12} {r['probability_of_approval']:>7.1%} "
                       f"{r['unrisked_npv']:>16,.0f} {r['rnpv']:>16,.0f} {option_display}")
             pipeline_value = sum(d["result"]["rnpv"] for d in drugs)
-            pipeline_equity = pipeline_value + cash - total_debt
-            pipeline_per_share = pipeline_equity / shares_out
+            pipeline_equity = pipeline_value + bridge_cash - bridge_debt
+            pipeline_per_share = pipeline_equity / value_shares
             print(f"\n  Pipeline rNPV:        ${pipeline_value:,.0f}")
-            print(f"  + cash - debt:        ${pipeline_equity:,.0f}   (cash ${cash:,.0f}, debt ${total_debt:,.0f})")
+            print(f"  + cash - claims:      ${pipeline_equity:,.0f}   (cash and investments ${bridge_cash:,.0f}, "
+                  f"debt and other claims ${bridge_debt:,.0f})")
             print(f"  Value per share:      ${pipeline_per_share:,.2f}   vs current price ${share_price:,.2f}")
             print("  Not included: corporate overhead and research not tied to any listed drug,")
             print("  and future dilution from raising cash to fund development — both lower")
@@ -2849,7 +2960,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         narrative_range = model.run_valuation_range_narrative(
             revenue, initial_growth, current_margin, target_margin,
             tax_rate_path, sales_to_capital, (initial_wacc, discount_rate), terminal_growth,
-            total_debt, cash, shares_out, years=narrative_years,
+            bridge_debt, bridge_cash, value_shares, years=narrative_years,
             return_on_new_capital=return_on_new_capital)
         print()
         for label in ("low", "base", "high"):
