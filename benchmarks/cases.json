@@ -12,7 +12,8 @@
      "answers": [["Drug name", ["VK2735", ""]], ["Phase (pre", "p3"], ["Peak annual sales", "5000000000"],
                  ["Remaining development", "800000000"]]},
     {"ticker": "O", "why": "REIT: FFO/AFFO dividend model, NAV, renamed debt tag", "flags": {"reit": true}, "answers": []},
-    {"ticker": "BABA", "why": "20-F ADR (8 shares per ADS), CNY reporting, Hong Kong country risk", "flags": {}, "answers": []},
+    {"ticker": "BABA", "why": "20-F ADR (8 shares per ADS), CNY reporting, Hong Kong country risk; EDGAR's Hong Kong address would give 16.5% tax, but profits are taxed in mainland China (25%)",
+     "flags": {}, "answers": [["type the marginal tax rate", "25"]]},
     {"ticker": "TSM", "why": "20-F ADR (5 per ADS), TWD reporting, no EDGAR domicile (Taiwan typed)",
      "flags": {}, "answers": [["type a country name", "Taiwan"]]},
     {"ticker": "SNOW", "why": "never GAAP-profitable: cycle normalization must decline", "flags": {}, "answers": []}

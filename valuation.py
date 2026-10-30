@@ -2488,6 +2488,42 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     regression_beta = beta
     damodaran = load_damodaran_data()
 
+    # ---- Country exposure and marginal tax rate. Asked here, before beta,
+    # because the marginal tax rate is needed to relever the beta (and
+    # later for terminal-year NOPAT and after-tax pensions), and the same
+    # country answer feeds the ERP's country risk premium below.
+    #
+    # Tax and ERP use different country bases, following Damodaran: the
+    # ERP is weighted by where REVENUE is earned (operating risk), but the
+    # marginal tax rate is the statutory rate where PROFITS are taxed —
+    # normally the domicile. The rate comes from his country table (a
+    # published figure) instead of a flat 25% US assumption for everyone.
+    domicile = edgar_domicile(cik)
+    country_mix = None
+    marginal_tax_rate, tax_source = DEFAULT_MARGINAL_TAX_RATE, "US statutory default"
+    if damodaran["countries"]:
+        countries = damodaran["countries"]["countries"]
+        print(f"\n{'='*60}")
+        print(f"  Country exposure (Damodaran's country table, {damodaran['countries']['updated']})")
+        print(f"{'='*60}")
+        country_mix = choose_country_mix(ticker, domicile, countries)
+        if domicile in countries and countries[domicile]["tax"] is not None:
+            tax_country = domicile
+        elif len(country_mix) == 1 and countries[country_mix[0][0]]["tax"] is not None:
+            tax_country = country_mix[0][0]  # no domicile on EDGAR — use the country named (TSMC: Taiwan)
+        else:
+            tax_country = None
+        if tax_country:
+            marginal_tax_rate = countries[tax_country]["tax"]
+            tax_source = f"{tax_country} statutory rate, Damodaran's country table"
+    print(f"  Marginal tax rate: {marginal_tax_rate:.2%}  ({tax_source})")
+    print("  (Where profits are taxed, normally the domicile. If most profits are taxed elsewhere —")
+    print("  e.g. a Hong Kong-addressed company whose profits are mainland Chinese, at 25% — type that.)")
+    typed_tax = prompt_number(f"  Press Enter to use {marginal_tax_rate:.2%}, or type the marginal tax rate as a percent: ",
+                              default=marginal_tax_rate * 100) / 100
+    if abs(typed_tax - marginal_tax_rate) > 1e-12:
+        marginal_tax_rate, tax_source = typed_tax, "typed"
+
     print(f"\n{'='*60}")
     print("  Beta (bottom-up, Damodaran industry average)")
     print(f"{'='*60}")
@@ -2505,13 +2541,13 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         if mix:
             unlevered = model.weighted_unlevered_beta(
                 [(industries[name]["unlevered_beta_cash"], weight) for name, weight in mix])
-            industry_beta = model.relever_beta(unlevered, DEFAULT_MARGINAL_TAX_RATE, debt_to_equity)
+            industry_beta = model.relever_beta(unlevered, marginal_tax_rate, debt_to_equity)
             for name, weight in mix:
                 d = industries[name]
                 print(f"    {name:<42} unlevered {d['unlevered_beta_cash']:.2f}  ({d['firms']} firms)"
                       + (f"  x {weight:.0%}" if len(mix) > 1 else ""))
             print(f"  Unlevered beta: {unlevered:.2f}  -> relevered at D/E {debt_to_equity:.2f}, "
-                  f"{DEFAULT_MARGINAL_TAX_RATE:.0%} marginal tax: {industry_beta:.2f}")
+                  f"{marginal_tax_rate:.1%} marginal tax: {industry_beta:.2f}")
             print(f"  (Damodaran's US industry betas, updated {damodaran['betas']['updated']})")
             industry_label = " + ".join(name for name, _ in mix)
     else:
@@ -2531,7 +2567,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     else:
         try:
             typed_unlevered = parse_number(answer)
-            beta = model.relever_beta(typed_unlevered, DEFAULT_MARGINAL_TAX_RATE, debt_to_equity)
+            beta = model.relever_beta(typed_unlevered, marginal_tax_rate, debt_to_equity)
             beta_source = f"typed unlevered {typed_unlevered:.2f}, relevered"
         except ValueError:
             print("  Couldn't read that — using the " +
@@ -2581,13 +2617,13 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         print(f"  Damodaran's current ERP couldn't be loaded — falling back to {default_erp:.2%}.")
 
     # Country risk: operations-weighted CRP on top of the US implied ERP
-    # (see the COUNTRY RISK section above for the formula).
-    country_mix, country_adjustment = None, 0.0
-    if damodaran["countries"]:
+    # (see the COUNTRY RISK section above for the formula), using the
+    # country mix chosen before beta.
+    country_adjustment = 0.0
+    if country_mix:
         countries = damodaran["countries"]["countries"]
         us_crp = countries["United States"]["crp"]
         print(f"\n  Country risk (Damodaran's country premiums, {damodaran['countries']['updated']})")
-        country_mix = choose_country_mix(ticker, edgar_domicile(cik), countries)
         weighted_crp = model.weighted_unlevered_beta([(countries[n]["crp"], w) for n, w in country_mix])
         for name, weight in country_mix:
             print(f"    {name:<28} CRP {countries[name]['crp']:.2%}"
@@ -2774,7 +2810,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     # The terminal NOPAT basis is taxed at the marginal rate: effective
     # rates drift toward it as tax breaks and NOL shields run out, and
     # Damodaran's Ginzu uses the marginal rate in stable growth.
-    terminal_nopat_basis = ebit * (1 - DEFAULT_MARGINAL_TAX_RATE)
+    terminal_nopat_basis = ebit * (1 - marginal_tax_rate)
 
     # ---- Growth stage: a flat growth rate for N years then a hard drop to
     # terminal growth is only realistic for a mature company. A young or
@@ -3043,8 +3079,8 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         print(f"  - Debt (incl. operating leases):          ${total_debt:>18,.0f}")
         print(f"  - Minority interests (book):              ${minority_interest:>18,.0f}")
         print(f"  - Preferred stock:                        ${bridge_preferred:>18,.0f}")
-        print(f"  - Unfunded pensions (x {1 - DEFAULT_MARGINAL_TAX_RATE:.0%} after tax):     "
-              f"${pension_liability * (1 - DEFAULT_MARGINAL_TAX_RATE):>18,.0f}")
+        print(f"  - Unfunded pensions (x {1 - marginal_tax_rate:.0%} after tax):     "
+              f"${pension_liability * (1 - marginal_tax_rate):>18,.0f}")
         print(f"  + Cash and short-term investments:        ${cash:>18,.0f}")
         print(f"  + Equity-method investments (book):       ${equity_investments:>18,.0f}")
         print(f"  Shares: {shares_out:,.0f} basic + {other_dilution_shares:,.0f} options/RSUs/converts "
@@ -3075,7 +3111,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     # What the per-share math subtracts and adds; total_debt itself stays
     # pure debt, since that's what belongs in D/E and WACC.
     bridge_debt = (total_debt + minority_interest + bridge_preferred
-                   + pension_liability * (1 - DEFAULT_MARGINAL_TAX_RATE))
+                   + pension_liability * (1 - marginal_tax_rate))
     bridge_cash = cash + equity_investments
     value_shares = shares_out + other_dilution_shares
 
@@ -3257,8 +3293,9 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         drug_margin_input = input("  Drug-level operating margin once on market (e.g. 40 for 40%; "
                                   "Enter for 40%): ").strip()
         drug_margin = parse_number(drug_margin_input) / 100 if drug_margin_input else 0.40
-        drug_tax_input = input("  Tax rate on drug profits (e.g. 25 for 25%; Enter for 25%): ").strip()
-        drug_tax_rate = parse_number(drug_tax_input) / 100 if drug_tax_input else 0.25
+        drug_tax_input = input(f"  Tax rate on drug profits (e.g. 25 for 25%; Enter for the marginal "
+                               f"{marginal_tax_rate:.1%}): ").strip()
+        drug_tax_rate = parse_number(drug_tax_input) / 100 if drug_tax_input else marginal_tax_rate
         vol_input = input("  Volatility of a drug's commercial value, for the option cross-check\n"
                           "  (e.g. 40 for 40%; Enter for 40%): ").strip()
         drug_volatility = parse_number(vol_input) / 100 if vol_input else 0.40
@@ -3416,9 +3453,10 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         print(f"  Trailing effective tax rate (used elsewhere above): {effective_tax_rate:.1%} — often")
         print("  already suppressed by real NOL usage, so NOT a good proxy for the rate this")
         print("  company pays once its NOLs are exhausted. Use a statutory estimate instead.")
-        marginal_input = input("  Marginal tax rate once NOLs run out (e.g. 25 for 25%; Enter for "
-                                "25%): ").strip()
-        marginal_tax_rate = parse_number(marginal_input) / 100 if marginal_input else 0.25
+        marginal_input = input(f"  Marginal tax rate once NOLs run out (e.g. 25 for 25%; Enter for "
+                               f"{marginal_tax_rate:.1%}, the rate chosen above): ").strip()
+        if marginal_input:
+            marginal_tax_rate = parse_number(marginal_input) / 100
 
         # ---- Declining discount-rate glide path: a young, undiversified
         # company's true cost of capital is higher than the mature WACC
