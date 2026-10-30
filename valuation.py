@@ -3705,9 +3705,13 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         cagr, cagr_years = trailing_revenue_cagr(facts)
         print(f"  Current operating margin: {current_margin:.1%}" +
               (f"   (trailing revenue CAGR {cagr:.1%}, {cagr_years} — reference only)" if cagr is not None else ""))
-        print("  Reference mature margins (Damodaran's examples): ~20% software, ~8-10%")
-        print("  retail, ~12-15% industrial/hardware. Pick what this business converges")
-        print("  toward, not today's number.")
+        # Damodaran's industry margin is lease- and R&D-adjusted, the same
+        # basis as this EBIT, so it's the natural mature target to start from.
+        industry_margin, margin_updated = industry_average(damodaran, "margins", mix)
+        if industry_margin is not None:
+            print(f"  Industry operating margin: {industry_margin:.1%}  ({' + '.join(n for n, _ in mix)}; Damodaran,")
+            print(f"  {margin_updated}, lease & R&D adjusted — the same basis as the EBIT here).")
+        print("  Pick the margin this business converges toward, not today's number.")
         growth_input = input(f"  Initial revenue growth rate, fading to {terminal_growth:.2%} (terminal) by "
                               "year 10\n  (e.g. 30 for 30%; Enter for 0%): ").strip()
         initial_growth = parse_number(growth_input) / 100 if growth_input else 0.0
@@ -3718,6 +3722,10 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
                                  f"{cycle_choice['span']} cycle {cycle_choice['method']}, "
                                  f"{cycle_choice['margin']:.1%}): ").strip()
             default_target = cycle_choice["margin"]
+        elif industry_margin is not None:
+            margin_input = input(f"  Target (mature) operating margin (e.g. 20 for 20%; Enter for the industry's "
+                                 f"{industry_margin:.1%}): ").strip()
+            default_target = industry_margin
         else:
             margin_input = input("  Target (mature) operating margin (e.g. 20 for 20%; Enter to hold today's "
                                   "margin flat): ").strip()
