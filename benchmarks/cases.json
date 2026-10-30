@@ -1,0 +1,20 @@
+{
+  "about": "Benchmark companies, each chosen to exercise a different part of the tool. 'answers' are [prompt substring, answer] pairs (a list answer is used in order); every other prompt gets Enter. See run_benchmarks.py.",
+  "cases": [
+    {"ticker": "AAPL", "why": "mature mega-cap, high ROIC, leases with no disclosed rate", "flags": {}, "answers": []},
+    {"ticker": "DOW", "why": "cyclical in a trough; no operating-income line (EBIT rebuilt), minority interest",
+     "flags": {"cyclical": true, "narrative": true}, "answers": [["Enter y/g/m", "g"]]},
+    {"ticker": "WMT", "why": "large operating leases, minority interest, reported dilution", "flags": {}, "answers": []},
+    {"ticker": "KO", "why": "large equity-method stakes in other companies", "flags": {}, "answers": []},
+    {"ticker": "NFLX", "why": "heavy option/RSU dilution", "flags": {}, "answers": []},
+    {"ticker": "VKTX", "why": "pre-revenue biotech: pipeline rNPV, short-term investments as cash, repaid stale debt",
+     "flags": {"biotech": true},
+     "answers": [["Drug name", ["VK2735", ""]], ["Phase (pre", "p3"], ["Peak annual sales", "5000000000"],
+                 ["Remaining development", "800000000"]]},
+    {"ticker": "O", "why": "REIT: FFO/AFFO dividend model, NAV, renamed debt tag", "flags": {"reit": true}, "answers": []},
+    {"ticker": "BABA", "why": "20-F ADR (8 shares per ADS), CNY reporting, Hong Kong country risk", "flags": {}, "answers": []},
+    {"ticker": "TSM", "why": "20-F ADR (5 per ADS), TWD reporting, no EDGAR domicile (Taiwan typed)",
+     "flags": {}, "answers": [["type a country name", "Taiwan"]]},
+    {"ticker": "SNOW", "why": "never GAAP-profitable: cycle normalization must decline", "flags": {}, "answers": []}
+  ]
+}

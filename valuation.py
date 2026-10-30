@@ -2124,8 +2124,16 @@ def choose_industries(ticker, sic, sic_description, industries, biotech=False):
 
 def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, reit=False,
                        cyclical=False):
+    """
+    Interactive valuation of one company. Prints the full build, and
+    returns a summary dict of the key inputs and results (beta, ERP, WACC,
+    low/base/high values per share, and whichever of the narrative,
+    pipeline, DDM and NAV views ran) — what benchmarks/run_benchmarks.py
+    compares between runs, so it doesn't have to scrape printed text.
+    """
     cik, company_name = get_cik_for_ticker(ticker)
     print(f"Found CIK {cik} for {company_name}")
+    summary = {"ticker": ticker.upper(), "company": company_name}
 
     financials, facts = pull_financials(cik)
     fx_currency = get_reporting_currency(financials)
@@ -2600,6 +2608,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     # Computed here (rather than down with WACC) because the dividend
     # discount model below needs cost of equity too, before WACC exists.
     coe = model.cost_of_equity(risk_free_rate, beta, erp)
+    summary.update(beta=beta, risk_free_rate=risk_free_rate, erp=erp, cost_of_equity=coe)
 
     # ---- Reinvestment-rate-derived growth (Damodaran fundamental growth) ----
     # NOTE: change in net working capital defaults to 0 here, same simplification
@@ -2709,6 +2718,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     wacc_input = input("  Press Enter to use the computed WACC, or type an override as a\n"
                        "  percent to reflect risk CAPM doesn't price in (e.g. 12 for 12%): ").strip()
     discount_rate = parse_number(wacc_input) / 100 if wacc_input else computed_discount_rate
+    summary["wacc"] = discount_rate
     if wacc_input:
         print(f"  Using override WACC: {discount_rate:.2%}")
 
@@ -2830,6 +2840,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
                   f"({div_n} yr(s), {div_years})")
             ddm_results = model.run_dividend_discount_range(
                 latest_dps, div_growth, high_growth_years, fade_years, coe, terminal_growth)
+            summary["ddm"] = {label: ddm_results[label]["value_per_share"] for label in ("low", "base", "high")}
             print(f"  Discounting at cost of equity ({coe:.2%}, not WACC — a dividend is a cash")
             print("  flow to equity holders, already net of debt service):")
             for label in ("low", "base", "high"):
@@ -2943,6 +2954,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         if dps > 0:
             ddm_results = model.run_dividend_discount_range(
                 dps, reit_growth, high_growth_years, fade_years, coe, terminal_growth)
+            summary["ddm"] = {label: ddm_results[label]["value_per_share"] for label in ("low", "base", "high")}
             print(f"\n  Dividend discount model (cost of equity {coe:.2%}, {high_growth_years} yrs at "
                   f"{reit_growth:.2%}, {fade_years}-yr fade to {terminal_growth:.2%}):")
             for label in ("low", "base", "high"):
@@ -2980,6 +2992,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         cap_input = input("  Cap rate (e.g. 6.5 for 6.5%; Enter for 6.5%): ").strip()
         cap_rate = parse_number(cap_input) / 100 if cap_input else 0.065
         nav = model.reit_nav_per_share(noi, cap_rate, cash, reit_debt, preferred, shares_out)
+        summary["nav_per_share"] = nav["nav_per_share"]
         premium = share_price / nav["nav_per_share"] - 1 if nav["nav_per_share"] > 0 else None
         print(f"  Property value: ${nav['property_value']:,.0f}   + cash ${cash:,.0f}   - debt ${reit_debt:,.0f}"
               f"   - preferred ${preferred:,.0f}")
@@ -3068,6 +3081,10 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
 
     print(f"\n{'='*60}")
     print("  Assumptions used")
+    summary.update(revenue=revenue, ebit=ebit, fcff=fcff, total_debt=total_debt, cash=cash,
+                   bridge_debt=bridge_debt, bridge_cash=bridge_cash, shares=value_shares,
+                   adr_ratio=adr_ratio, terminal_growth=terminal_growth,
+                   return_on_new_capital=return_on_new_capital, share_price=share_price)
     print(f"{'='*60}")
     print(f"  Effective tax rate:        {effective_tax_rate:.2%}")
     print(f"  Beta:                      {beta:.2f}  ({beta_source})")
@@ -3128,6 +3145,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
 
     print(f"\n{'='*60}")
     print(f"  VALUATION RANGE — {company_name} ({ticker.upper()})")
+    summary["dcf"] = {label: results[label]["value_per_share"] for label in ("low", "base", "high")}
     print(f"{'='*60}")
     print(f"  Current market price: ${share_price:,.2f}\n")
     for label in ("low", "base", "high"):
@@ -3296,6 +3314,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
             pipeline_value = sum(d["result"]["rnpv"] for d in drugs)
             pipeline_equity = pipeline_value + bridge_cash - bridge_debt
             pipeline_per_share = pipeline_equity / value_shares
+            summary["pipeline_per_share"] = pipeline_per_share
             print(f"\n  Pipeline rNPV:        ${pipeline_value:,.0f}")
             print(f"  + cash - claims:      ${pipeline_equity:,.0f}   (cash and investments ${bridge_cash:,.0f}, "
                   f"debt and other claims ${bridge_debt:,.0f})")
@@ -3454,6 +3473,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
             r = narrative_range[label]
             print(f"  {label.upper():5s}: ${r['value_per_share']:>10,.2f} per share   "
                   f"(mature WACC={r['discount_rate']:.2%}, terminal growth={r['terminal_growth_rate']:.2%})")
+        summary["narrative"] = {label: narrative_range[label]["value_per_share"] for label in ("low", "base", "high")}
         if narrative_range["ordering_warning"]:
             print(f"\n  ⚠ {narrative_range['ordering_warning']}")
 
@@ -3509,6 +3529,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
             print(f"  {label.upper():5s}: ${blended:>10,.2f} per share   "
                   f"(going-concern ${going_concern:,.2f}, liquidation ${liquidation_value:,.2f}, "
                   f"P(fail)={probability_of_failure:.0%})")
+        summary["narrative_failure_adjusted"] = dict(blended_values)
         blend_ordering_warning = model.ordering_warning_for_range(
             blended_values["low"], blended_values["base"], blended_values["high"])
         if blend_ordering_warning:
@@ -3523,6 +3544,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     if missing:
         print(f"  ⚠ Note: {', '.join(missing)} had to be entered manually — EDGAR")
         print("    didn't have them under any tag this script currently checks.\n")
+    return summary
 
 
 if __name__ == "__main__":

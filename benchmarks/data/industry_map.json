@@ -1,0 +1,92 @@
+{
+  "AAPL": {
+    "industries": [
+      [
+        "Computers/Peripherals",
+        1.0
+      ]
+    ],
+    "sic": 3571
+  },
+  "BABA": {
+    "industries": [
+      [
+        "Business & Consumer Services",
+        1.0
+      ]
+    ],
+    "sic": 7389
+  },
+  "DOW": {
+    "industries": [
+      [
+        "Chemical (Basic)",
+        1.0
+      ]
+    ],
+    "sic": 2821
+  },
+  "KO": {
+    "industries": [
+      [
+        "Beverage (Alcoholic)",
+        1.0
+      ]
+    ],
+    "sic": 2080
+  },
+  "NFLX": {
+    "industries": [
+      [
+        "Entertainment",
+        1.0
+      ]
+    ],
+    "sic": 7841
+  },
+  "O": {
+    "industries": [
+      [
+        "R.E.I.T.",
+        1.0
+      ]
+    ],
+    "sic": 6798
+  },
+  "SNOW": {
+    "industries": [
+      [
+        "Software (System & Application)",
+        1.0
+      ]
+    ],
+    "sic": 7372
+  },
+  "TSM": {
+    "industries": [
+      [
+        "Semiconductor",
+        1.0
+      ]
+    ],
+    "sic": 3674
+  },
+  "VKTX": {
+    "industries": [
+      [
+        "Drugs (Biotechnology)",
+        1.0
+      ]
+    ],
+    "sic": 2834
+  },
+  "WMT": {
+    "industries": [
+      [
+        "Retail (General)",
+        1.0
+      ]
+    ],
+    "sic": 5331
+  }
+}
