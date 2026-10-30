@@ -223,32 +223,32 @@
   },
   "TSM": {
     "adr_ratio": 5.0,
-    "beta": 1.5005200071285563,
-    "bridge_cash": 64886500000.0,
-    "bridge_debt": 970500000.0,
-    "cash": 64886500000,
+    "beta": 1.500522713086975,
+    "bridge_cash": 65220614223.066,
+    "bridge_debt": 975550185.8552,
+    "cash": 65220614223.066,
     "company": "TAIWAN SEMICONDUCTOR MANUFACTURING CO LTD",
-    "cost_of_equity": 0.12107470033860643,
+    "cost_of_equity": 0.12107482887163132,
     "dcf": {
-      "base": 74.66489297877919,
-      "high": 81.76809337508936,
-      "low": 68.69941753950299
+      "base": 75.37761684545322,
+      "high": 82.50730777303892,
+      "low": 69.38840237922969
     },
-    "ebit": 42789533333.333336,
+    "ebit": 43253752637.792,
     "erp": 0.0475,
-    "fcff": 21601681810.796097,
+    "fcff": 22772544181.900925,
     "return_on_new_capital": null,
-    "revenue": 88268000000,
+    "revenue": 88722565536.4166,
     "risk_free_rate": 0.049800000000000004,
     "sanity": {
-      "tv_share_dcf": 0.8062038382395216
+      "tv_share_dcf": 0.7993850685856392
     },
     "share_price": 431.81,
     "shares": 5186504904.2,
     "terminal_growth": 0.025,
     "ticker": "TSM",
-    "total_debt": 970500000,
-    "wacc": 0.12104243132202934
+    "total_debt": 975550185.8552,
+    "wacc": 0.12104239194055585
   },
   "VKTX": {
     "adr_ratio": 1.0,

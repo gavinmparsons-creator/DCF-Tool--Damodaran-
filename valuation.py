@@ -422,25 +422,30 @@ def primary_reporting_currency(all_tags):
     through meant the currency of each year depended on JSON key order,
     and multi-year figures (the trailing tax rate) mixed years translated
     at the filer's own historical rates with years we convert at today's.
-    The latest report decides, so a filer that switched currencies is
-    read in the one it uses now.
+    The latest report with currency facts decides, so a filer that
+    switched currencies is read in the one it uses now.
     """
     sample = next(iter(all_tags.values()), None)
     cache = _PRIMARY_CURRENCY_CACHE
     if cache[0] is sample and cache[1] == len(all_tags):
         return cache[2]
-    latest_accn, latest_filed = None, ""
+    # Currency facts per annual report: {accn: (filed, {currency: count})}.
+    # Only reports with currency facts count — SEC's companyfacts can lag a
+    # new filing and carry just its cover-page share counts (TSMC's and
+    # FEMSA's FY2025 20-Fs), which would otherwise leave no currency to pick.
+    reports = {}
     for data in all_tags.values():
         for unit, entries in data.get("units", {}).items():
+            if not _is_currency_code(unit):
+                continue
             for e in entries:
-                if e.get("form") in ("10-K", "20-F", "40-F") and e.get("filed", "") > latest_filed:
-                    latest_accn, latest_filed = e.get("accn"), e["filed"]
-    counts = {}
-    for data in all_tags.values():
-        for unit, entries in data.get("units", {}).items():
-            if _is_currency_code(unit):
-                counts[unit] = counts.get(unit, 0) + sum(1 for e in entries if e.get("accn") == latest_accn)
-    currency = max(sorted(counts), key=counts.get) if counts and max(counts.values()) else None
+                if e.get("form") in ("10-K", "20-F", "40-F") and e.get("accn"):
+                    filed, counts = reports.setdefault(e["accn"], (e.get("filed", ""), {}))
+                    counts[unit] = counts.get(unit, 0) + 1
+    currency = None
+    if reports:
+        _, counts = max(reports.values(), key=lambda r: r[0])
+        currency = max(sorted(counts), key=counts.get)
     cache[:] = [sample, len(all_tags), currency]
     return currency
 
@@ -1263,7 +1268,9 @@ def pull_financials(cik):
 
 def get_fx_rate_to_usd(currency):
     """Look up a live currency->USD rate (ECB-sourced, via frankfurter.dev,
-    no API key required). Falls back to manual entry if the request fails."""
+    no API key required). The ECB doesn't publish every currency — not the
+    Taiwan dollar, for one — so Yahoo's market rate is tried next, then
+    manual entry."""
     url = FX_RATE_URL.format(currency=currency)
     try:
         data = fetch_json_or_none(url)
@@ -1271,6 +1278,16 @@ def get_fx_rate_to_usd(currency):
             return data["rates"]["USD"], data.get("date")
     except Exception:
         pass
+    if YFINANCE_AVAILABLE:
+        try:
+            info = yf.Ticker(f"{currency}USD=X").info
+            rate = info.get("regularMarketPrice") or info.get("previousClose")
+            if rate:
+                from datetime import date
+                print(f"  (The ECB doesn't publish {currency} — using Yahoo's market rate.)")
+                return float(rate), date.today().isoformat()
+        except Exception:
+            pass
     print(f"  Could not fetch a live {currency}->USD exchange rate.")
     rate = prompt_number(f"  Enter the {currency}->USD exchange rate manually (e.g. 1.16): ")
     return rate, None
