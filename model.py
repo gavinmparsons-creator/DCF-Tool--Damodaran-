@@ -522,7 +522,7 @@ def project_fcff_multi_stage(base_fcff, high_growth_rate, high_growth_years,
 
 def enterprise_value_multi_stage(base_fcff, high_growth_rate, high_growth_years,
                                   fade_years, terminal_growth_rate, discount_rate,
-                                  base_nopat=None, return_on_new_capital=None):
+                                  base_nopat=None, return_on_new_capital=None, return_breakdown=False):
     """
     Full three-stage DCF: project FCFF through the high-growth and fade
     stages, discount each year back, add the discounted Gordon Growth
@@ -534,6 +534,9 @@ def enterprise_value_multi_stage(base_fcff, high_growth_rate, high_growth_years,
     as FCFF, and stable-growth FCFF is rebuilt from it with reinvestment
     = g / return_on_new_capital (default: the discount rate). Without it,
     the final projected FCFF is grown as is (the older behavior).
+
+    return_breakdown=True returns {"ev", "pv_explicit", "pv_terminal"}
+    instead of the bare EV — for the terminal-value-share sanity check.
     """
     projected = project_fcff_multi_stage(base_fcff, high_growth_rate, high_growth_years,
                                           fade_years, terminal_growth_rate)
@@ -553,6 +556,9 @@ def enterprise_value_multi_stage(base_fcff, high_growth_rate, high_growth_years,
         tv = terminal_value(projected[-1], terminal_growth_rate, discount_rate)
     pv_of_terminal_value = tv / ((1 + discount_rate) ** total_years)
 
+    if return_breakdown:
+        return {"ev": pv_of_explicit_period + pv_of_terminal_value,
+                "pv_explicit": pv_of_explicit_period, "pv_terminal": pv_of_terminal_value}
     return pv_of_explicit_period + pv_of_terminal_value
 
 
@@ -917,7 +923,7 @@ def project_narrative_path(current_revenue, initial_growth_rate, current_margin,
 
 def enterprise_value_narrative(current_revenue, initial_growth_rate, current_margin, target_margin,
                                 tax_rate, sales_to_capital_ratio, discount_rate, terminal_growth_rate,
-                                years=10, return_on_new_capital=None):
+                                years=10, return_on_new_capital=None, return_breakdown=False):
     """
     Full narrative DCF (Damodaran's "Ginzu"-style build): rebuilds the
     revenue and margin paths fresh off the terminal_growth_rate passed
@@ -950,7 +956,8 @@ def enterprise_value_narrative(current_revenue, initial_growth_rate, current_mar
     perpetual growth. return_on_new_capital defaults to the (final-year)
     discount rate; see terminal_value_consistent.
 
-    Returns enterprise value (before subtracting debt / adding cash).
+    Returns enterprise value (before subtracting debt / adding cash), or
+    with return_breakdown=True {"ev", "pv_explicit", "pv_terminal"}.
     """
     revenue_path = project_revenue_path(current_revenue, initial_growth_rate, terminal_growth_rate, years)
     margin_path = project_margin_path(current_margin, target_margin, years)
@@ -978,7 +985,35 @@ def enterprise_value_narrative(current_revenue, initial_growth_rate, current_mar
                                        return_on_new_capital)
         pv_of_terminal_value = tv / ((1 + discount_rate) ** years)
 
+    if return_breakdown:
+        return {"ev": pv_of_explicit_period + pv_of_terminal_value,
+                "pv_explicit": pv_of_explicit_period, "pv_terminal": pv_of_terminal_value}
     return pv_of_explicit_period + pv_of_terminal_value
+
+
+def narrative_roic_path(invested_capital, reinvestment_path, ebit_path, tax_rate):
+    """
+    Return on invested capital each forecast year for the narrative path:
+    NOPAT in year t / the capital in place at the START of year t, where
+    capital = today's invested capital + all reinvestment through year
+    t-1. Damodaran's check on a narrative: if the year-10 return is below
+    the cost of capital, the growth destroys value; if it's far above the
+    industry's, the story needs a durable competitive advantage to be
+    believable.
+
+    `tax_rate` is a flat rate or a per-year list (e.g. the NOL ramp).
+    Returns a list of ROICs (None for a year whose starting capital isn't
+    positive), same length as ebit_path.
+    """
+    n = len(ebit_path)
+    if len(reinvestment_path) != n:
+        raise ValueError("reinvestment_path and ebit_path must be the same length")
+    taxes = tax_rate if isinstance(tax_rate, list) else [tax_rate] * n
+    roics, capital = [], invested_capital
+    for ebit, tax, reinvestment in zip(ebit_path, taxes, reinvestment_path):
+        roics.append(ebit * (1 - tax) / capital if capital > 0 else None)
+        capital += reinvestment
+    return roics
 
 
 def run_valuation_range_narrative(current_revenue, initial_growth_rate, current_margin, target_margin,
@@ -2166,6 +2201,23 @@ if __name__ == "__main__":
     assert even["n_years"] == 3 and even["margins"][3] is None, "Zero-revenue year must be skipped!"
     assert abs(cycle_margin_stats([10, 30], [100, 100])["median"] - 0.20) < 1e-12, \
         "Even-count median must average the middle two margins!"
+
+    # Value breakdowns must add up to the bare EV, for both DCFs.
+    bd = enterprise_value_multi_stage(100, 0.05, 2, 0, 0.02, 0.10, base_nopat=150, return_breakdown=True)
+    assert abs(bd["ev"] - (105 / 1.1 + 110.25 / 1.21 + 1686.825 / 1.21)) < 1e-6 \
+        and abs(bd["pv_explicit"] + bd["pv_terminal"] - bd["ev"]) < 1e-9, \
+        "Multi-stage breakdown must add up to the enterprise value!"
+    assert abs(bd["pv_terminal"] - 1686.825 / 1.21) < 1e-6, "Multi-stage terminal PV mismatch!"
+    bd_n = enterprise_value_narrative(100, 0.40, -0.10, 0.20, 0.25, 2.0, 0.12, 0.03, years=4, return_breakdown=True)
+    assert abs(bd_n["ev"] - enterprise_value_narrative(100, 0.40, -0.10, 0.20, 0.25, 2.0, 0.12, 0.03, years=4)) < 1e-9, \
+        "Narrative breakdown EV must match the bare EV!"
+
+    # narrative_roic_path: capital 100, reinvest [10, 20], EBIT [20, 33], tax 25%:
+    #   year 1: 20 x 0.75 / 100 = 15%;  year 2: 33 x 0.75 / (100 + 10) = 22.5%
+    roic_path = narrative_roic_path(100, [10, 20], [20, 33], 0.25)
+    print(f"Narrative ROIC path: {roic_path}  (expected [0.15, 0.225])")
+    assert abs(roic_path[0] - 0.15) < 1e-12 and abs(roic_path[1] - 0.225) < 1e-12, "Narrative ROIC path mismatch!"
+    assert narrative_roic_path(0, [10], [20], 0.25) == [None], "Non-positive starting capital must give None!"
 
     # weighted_unlevered_beta: 60% in a 0.64 business, 40% in a 0.82 one
     #   = 0.6*0.64 + 0.4*0.82 = 0.384 + 0.328 = 0.712; weights in dollars
