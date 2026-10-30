@@ -152,9 +152,14 @@ METRIC_TAGS = {
         "CurrentBorrowingsAndCurrentPortionOfNoncurrentBorrowings",  # ifrs-full
         "ConvertibleDebtCurrent",  # growth-stage tech filers often carry converts, not term loans
         "LongTermDebtAndCapitalLeaseObligationsCurrent",  # e.g. Sirius XM: combined debt+lease presentation
+        # ifrs-full: short-term borrowings and the current portion of long-term
+        # borrowings are separate concepts by definition (their total is the
+        # combined tag above), so a filer tagging both needs them summed (FEMSA)
+        ("ShorttermBorrowings", "CurrentPortionOfLongtermBorrowings"),
         "ShorttermBorrowings",  # ifrs-full casing
         "ShortTermBorrowings",  # us-gaap casing (genuinely a different tag — XBRL names are case-sensitive) — e.g. GE Vernova
         "ConvertibleNotesPayableCurrent",  # e.g. Akamai
+        "CurrentPortionOfLongtermBorrowings",  # ifrs-full: TSMC, whose short-term borrowings stopped in FY2021
     ],
     "total_debt_noncurrent": [
         "LongTermDebtNoncurrent",
@@ -1169,6 +1174,7 @@ SHORT_TERM_INVESTMENT_TAGS = [
     "AvailableForSaleSecuritiesCurrent",
     "HeldToMaturitySecuritiesCurrent",
     "OtherShortTermInvestments",
+    "CurrentInvestments",  # ifrs-full (FEMSA)
 ]
 
 
@@ -2601,7 +2607,12 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     # leases). Finance leases are left alone: many filers already fold
     # them into long-term debt, so adding them could double count. ----
     lease_liability, lease_interest = 0.0, 0.0
-    fiscal_years_seen = [info["fiscal_year"] for info in financials.values() if info["fiscal_year"] is not None]
+    # The cover-page share count is dated after year-end (TSMC's FY2025
+    # 20-F cover, while SEC still only has its FY2024 statements), so it
+    # doesn't count toward the statements' year — otherwise every FY2024
+    # balance-sheet item below would be dropped as stale.
+    fiscal_years_seen = [info["fiscal_year"] for info in financials.values()
+                         if info["fiscal_year"] is not None and info.get("tag") != "EntityCommonStockSharesOutstanding"]
     # None when every metric was manually entered (e.g. a brand-new IPO with no
     # EDGAR data at all yet) — there's no freshness baseline to compare a lease
     # tag against, and no EDGAR lease data to find anyway, so skip this block.
@@ -3256,12 +3267,13 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
             val *= fx_rate  # a per-share price like an option strike is "TWD/shares", not "TWD"
         return val, tag
 
-    minority_interest, _ = current_value(["MinorityInterest"])
+    minority_interest, _ = current_value(["MinorityInterest", "NoncontrollingInterests"])  # us-gaap, ifrs-full
     bridge_preferred, _ = current_value(["PreferredStockValue"])
     pension_liability, _ = current_value(["DefinedBenefitPensionPlanLiabilitiesNoncurrent",
                                           "PensionAndOtherPostretirementDefinedBenefitPlansLiabilitiesNoncurrent",
                                           "LiabilityDefinedBenefitPlanNoncurrent"])
-    equity_investments, _ = current_value(["EquityMethodInvestments"])
+    equity_investments, _ = current_value(["EquityMethodInvestments",
+                                           "InvestmentAccountedForUsingEquityMethod"])  # us-gaap, ifrs-full
     other_dilution_shares, dilution_period = latest_reported_dilution(facts)
     dilution_reported = other_dilution_shares is not None
     other_dilution_shares = (other_dilution_shares or 0.0) / adr_ratio  # filed in ordinary shares -> ADS units
