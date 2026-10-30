@@ -271,7 +271,7 @@ SMALL_FIRM_RATING_TABLE = [
 ]
 
 
-def synthetic_credit_rating(interest_coverage_ratio, large_firm=True):
+def synthetic_credit_rating(interest_coverage_ratio, large_firm=True, spreads=None):
     """
     Map an interest coverage ratio to (rating_label, default_spread)
     using the large- or small-firm table above. A negative or very low
@@ -279,15 +279,22 @@ def synthetic_credit_rating(interest_coverage_ratio, large_firm=True):
     through to the "D" bucket rather than erroring — that's a real,
     valid answer (distressed/defaulted-grade), not an edge case to guard
     against.
+
+    `spreads` ({rating: spread}, e.g. Damodaran's current published
+    table) replaces the illustrative spreads above for any rating it
+    covers. The coverage breakpoints still come from the tables above —
+    a spread depends on the rating, not the company's size, so one
+    published spread table serves both the large- and small-firm
+    breakpoints.
     """
     table = LARGE_FIRM_RATING_TABLE if large_firm else SMALL_FIRM_RATING_TABLE
     for min_coverage, rating, spread in table:
         if interest_coverage_ratio >= min_coverage:
-            return rating, spread
-    return table[-1][1], table[-1][2]  # unreachable (last bucket is -inf) but safe
+            return rating, (spreads or {}).get(rating, spread)
+    return table[-1][1], (spreads or {}).get(table[-1][1], table[-1][2])  # unreachable but safe
 
 
-def synthetic_cost_of_debt(ebit, interest_expense, risk_free_rate, large_firm=True):
+def synthetic_cost_of_debt(ebit, interest_expense, risk_free_rate, large_firm=True, spreads=None):
     """
     Damodaran's synthetic rating method, end to end: interest coverage
     ratio = EBIT / interest expense, mapped to a bond rating and default
@@ -308,7 +315,7 @@ def synthetic_cost_of_debt(ebit, interest_expense, risk_free_rate, large_firm=Tr
     if interest_expense <= 0:
         return None, None, None, None
     interest_coverage_ratio = ebit / interest_expense
-    rating, spread = synthetic_credit_rating(interest_coverage_ratio, large_firm)
+    rating, spread = synthetic_credit_rating(interest_coverage_ratio, large_firm, spreads)
     return risk_free_rate + spread, interest_coverage_ratio, rating, spread
 
 
@@ -2205,5 +2212,17 @@ if __name__ == "__main__":
                - (105 / 1.1 + 110.25 / 1.21 + terminal_value(110.25, 0.02, 0.10) / 1.21)) < 1e-6, \
         "Multi-stage EV without base_nopat must keep the old terminal value!"
 
+
+    # synthetic_credit_rating with published spreads: coverage 2.6x on the
+    # large-firm table is BBB (illustrative 1.90%); a published BBB spread
+    # of 1.11% must replace it, and a rating the published table lacks
+    # keeps the built-in spread.
+    assert synthetic_credit_rating(2.6, True) == ("BBB", 0.0190), "Built-in BBB spread mismatch!"
+    assert synthetic_credit_rating(2.6, True, {"BBB": 0.0111}) == ("BBB", 0.0111), \
+        "A published spread must replace the built-in one!"
+    assert synthetic_credit_rating(10, True, {"BBB": 0.0111}) == ("AAA", 0.0069), \
+        "A rating missing from the published table must keep the built-in spread!"
+    published_cod = synthetic_cost_of_debt(260, 100, 0.05, True, {"BBB": 0.0111})
+    assert abs(published_cod[0] - 0.0611) < 1e-12, "Synthetic cost of debt must use the published spread!"
 
     print("\n✓ All self-tests passed. The math is internally consistent.")

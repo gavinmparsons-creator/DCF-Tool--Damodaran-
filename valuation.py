@@ -1395,6 +1395,7 @@ def print_financials_report(company_name, financials):
 DAMODARAN_BETAS_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/Betas.html"
 DAMODARAN_HOME_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/home.htm"
 DAMODARAN_COUNTRY_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html"
+DAMODARAN_RATINGS_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ratings.html"
 COUNTRY_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "country_map.json")
 EDGAR_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -1511,6 +1512,28 @@ def parse_damodaran_countries(page):
             if "United States" in countries else None)
 
 
+def parse_damodaran_spreads(page):
+    """
+    Damodaran's current default spread for each bond rating, from his
+    ratings page (large non-financial firms' table, January 2026 at the
+    time of writing): {"as_of": "January 2026", "spreads": {"BBB": 0.0111,
+    ...}}, or None. His labels ("Baa2/BBB") are reduced to the S&P part
+    the rating tables in model.py use. Only the spreads are taken — the
+    coverage breakpoints stay model.py's (the large-firm ones match his
+    exactly; the small-firm ones aren't on this page).
+    """
+    spreads = {}
+    for r in _html_table_rows(page):
+        if len(r) >= 4 and "/" in r[2] and r[3].endswith("%"):
+            try:
+                spreads.setdefault(r[2].split("/")[-1].strip(), float(r[3].rstrip("%")) / 100)
+            except ValueError:
+                continue
+    as_of = re.search(r"(?i)as of ([A-Za-z]+ \d{4})", page)
+    return ({"as_of": as_of.group(1) if as_of else "unknown date", "spreads": spreads}
+            if {"AAA", "BBB", "D"} <= set(spreads) else None)
+
+
 def load_damodaran_data():
     """
     Industry betas and the current implied ERP, from cache when it's
@@ -1537,7 +1560,8 @@ def load_damodaran_data():
     changed = False
     for piece, url, parser in (("betas", DAMODARAN_BETAS_URL, parse_damodaran_betas),
                                ("erp", DAMODARAN_HOME_URL, parse_damodaran_erp),
-                               ("countries", DAMODARAN_COUNTRY_URL, parse_damodaran_countries)):
+                               ("countries", DAMODARAN_COUNTRY_URL, parse_damodaran_countries),
+                               ("ratings", DAMODARAN_RATINGS_URL, parse_damodaran_spreads)):
         if is_fresh(piece):
             continue
         page = fetch_text_or_none(url)
@@ -1555,7 +1579,8 @@ def load_damodaran_data():
                 json.dump(cache, f, indent=1)
         except OSError:
             pass  # caching is a convenience; the run continues without it
-    return {piece: cache[piece]["data"] if piece in cache else None for piece in ("betas", "erp", "countries")}
+    return {piece: cache[piece]["data"] if piece in cache else None
+            for piece in ("betas", "erp", "countries", "ratings")}
 
 
 # The US Treasury's daily par yield curve, one CSV per calendar year,
@@ -2713,7 +2738,8 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         latest_interest_expense = (latest_interest_expense or 0.0) + lease_interest
     if latest_interest_expense:
         synthetic_cod, interest_coverage, synthetic_rating, default_spread = model.synthetic_cost_of_debt(
-            ebit, latest_interest_expense, risk_free_rate, large_firm=is_large_firm)
+            ebit, latest_interest_expense, risk_free_rate, large_firm=is_large_firm,
+            spreads=(damodaran.get("ratings") or {}).get("spreads"))
 
     print(f"\n{'='*60}")
     print("  Synthetic credit rating (cost of debt)")
@@ -2726,9 +2752,13 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         print(f"  Default spread:          {default_spread:.2%}  over the risk-free rate")
         print(f"  Synthetic cost of debt:  {synthetic_cod:.2%}  "
               f"({risk_free_rate:.2%} risk-free + {default_spread:.2%} spread)")
-        print("  Spread values are illustrative (Damodaran republishes current spreads")
-        print("  periodically as credit markets move) — override below with the company's")
-        print("  actual bond yield if you have one, for precision.")
+        if damodaran.get("ratings"):
+            print(f"  Spread: Damodaran's published spread for {synthetic_rating} "
+                  f"(as of {damodaran['ratings']['as_of']}). Override below with the company's")
+            print("  actual bond yield if you have one.")
+        else:
+            print("  Spread values are the built-in illustrative ones (Damodaran's published table")
+            print("  couldn't be loaded) — override below with the company's actual bond yield.")
         cod_input = input(f"  Press Enter to use {synthetic_cod:.2%}, or type an override as a "
                            "percent (e.g. 6 for 6%): ").strip()
         cost_of_debt = parse_number(cod_input) / 100 if cod_input else synthetic_cod

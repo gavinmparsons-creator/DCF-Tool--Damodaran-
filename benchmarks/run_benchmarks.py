@@ -14,6 +14,8 @@ USAGE (from the dcf-tool folder):
     python3 benchmarks/run_benchmarks.py                    # replay saved data, compare to baseline
     python3 benchmarks/run_benchmarks.py --only AAPL DOW     # just some companies
     python3 benchmarks/run_benchmarks.py --refresh           # pull live data, save it as the new snapshot
+    python3 benchmarks/run_benchmarks.py --refresh-only load_damodaran_data
+                                                             # re-record just one source, replay the rest
     python3 benchmarks/run_benchmarks.py --update-baseline   # accept this run's results as the baseline
 
 A refresh changes the inputs, so after one, expect differences from the
@@ -73,9 +75,12 @@ def _from_json(name, value):
     return value
 
 
-def install_fixtures(ticker, refresh):
-    """Patch valuation's outside calls to record (refresh) or replay. Returns
-    the dict being recorded into, or the loaded fixture."""
+def install_fixtures(ticker, refresh, refresh_only=()):
+    """Patch valuation's outside calls to record (refresh) or replay. With
+    refresh_only, just those sources are called live and re-recorded into
+    the existing fixture — for when new code needs data the snapshot
+    doesn't have, without letting today's prices into the comparison.
+    Returns (fixture path, calls dict)."""
     path = os.path.join(FIXTURE_DIR, f"{ticker}.json.gz")
     if refresh:
         calls = {}
@@ -84,21 +89,25 @@ def install_fixtures(ticker, refresh):
             raise BenchmarkError(f"no saved data for {ticker} — run with --refresh first")
         with gzip.open(path, "rt") as f:
             calls = json.load(f)
-    depth = [0]  # only the outermost call is recorded (e.g. not load_damodaran_data's own page fetches)
+    # Only the outermost call is recorded, and anything it calls in turn
+    # runs live with it (e.g. load_damodaran_data's own page fetches) —
+    # replaying those from an older snapshot would mix old and new data.
+    depth = [0]
     for name in OUTSIDE_CALLS:
         real = getattr(valuation, f"_real_{name}", None) or getattr(valuation, name)
         setattr(valuation, f"_real_{name}", real)
 
         def wrapper(*args, _name=name, _real=real, **kwargs):
+            if depth[0] > 0:
+                return _real(*args, **kwargs)
             key = f"{_name}|{json.dumps([args, kwargs], sort_keys=True, default=str)}"
-            if refresh:
+            if refresh or _name in refresh_only:
                 depth[0] += 1
                 try:
                     result = _real(*args, **kwargs)
                 finally:
                     depth[0] -= 1
-                if depth[0] == 0:
-                    calls[key] = _to_json(_name, result)
+                calls[key] = _to_json(_name, result)
                 return result
             if key not in calls:
                 raise BenchmarkError(f"{ticker}: no saved response for {key[:120]} — "
@@ -133,7 +142,7 @@ def install_answers(answers):
     builtins.input = fake_input
 
 
-def run_case(case, refresh):
+def run_case(case, refresh, refresh_only=()):
     ticker = case["ticker"].upper()
     # The benchmarks keep their own saved industry / ADR / country choices,
     # so they're fixed and never touch the user's own data/ files.
@@ -145,7 +154,7 @@ def run_case(case, refresh):
     # A fresh, empty cache on refresh, so Damodaran's data really is re-fetched.
     valuation.DAMODARAN_CACHE_PATH = os.path.join(tempfile.mkdtemp(), "damodaran_cache.json")
 
-    fixture_path, calls = install_fixtures(ticker, refresh)
+    fixture_path, calls = install_fixtures(ticker, refresh, refresh_only)
     install_answers(case.get("answers", []))
     flags = case.get("flags", {})
     log = io.StringIO()
@@ -159,7 +168,7 @@ def run_case(case, refresh):
         os.makedirs(LOG_DIR, exist_ok=True)
         with open(os.path.join(LOG_DIR, f"{ticker}.log"), "w") as f:
             f.write(log.getvalue())
-    if refresh:
+    if refresh or refresh_only:
         os.makedirs(FIXTURE_DIR, exist_ok=True)
         with gzip.open(fixture_path, "wt") as f:
             json.dump(calls, f)
@@ -216,6 +225,8 @@ def main():
     parser = argparse.ArgumentParser(description="Regression benchmarks for the valuation tool.")
     parser.add_argument("--refresh", action="store_true",
                         help="pull live data and save it as the new snapshot")
+    parser.add_argument("--refresh-only", nargs="+", default=(), metavar="SOURCE", choices=OUTSIDE_CALLS,
+                        help="re-record just these outside calls live (e.g. load_damodaran_data), replay the rest")
     parser.add_argument("--update-baseline", action="store_true",
                         help="accept this run's results as the new baseline")
     parser.add_argument("--only", nargs="+", metavar="TICKER", help="run just these companies")
@@ -235,7 +246,7 @@ def main():
         ticker = case["ticker"].upper()
         print(f"{ticker:<6} {'refreshing' if args.refresh else 'replaying'}...", end=" ", flush=True)
         try:
-            summary = run_case(case, args.refresh)
+            summary = run_case(case, args.refresh, tuple(args.refresh_only))
             results[ticker] = summary
             base = summary.get("dcf", {}).get("base")
             print("ok" + (f"  (DCF base ${base:,.2f})" if base is not None else ""))
