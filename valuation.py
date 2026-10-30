@@ -402,6 +402,64 @@ def _all_taxonomy_tags(facts_json):
     return all_tags
 
 
+def _is_currency_code(unit):
+    """"MXN", "USD" (ISO codes) — not "shares", "pure" or "MXN/shares"."""
+    return len(unit) == 3 and unit.isalpha() and unit.isupper()
+
+
+_PRIMARY_CURRENCY_CACHE = [None, None, None]  # (sample tag dict kept alive, tag count, currency)
+
+
+def primary_reporting_currency(all_tags):
+    """
+    The currency the filer actually keeps its books in: the majority
+    currency among the facts in its most recent annual report.
+
+    Some foreign filers tag a USD "convenience translation" alongside
+    their own currency under the SAME tag (FEMSA: 148 of its 337 tags in
+    both MXN and USD), but only for some years — its pre-tax income has
+    USD for 2017, 2023 and 2024 and nothing in between. Letting both
+    through meant the currency of each year depended on JSON key order,
+    and multi-year figures (the trailing tax rate) mixed years translated
+    at the filer's own historical rates with years we convert at today's.
+    The latest report decides, so a filer that switched currencies is
+    read in the one it uses now.
+    """
+    sample = next(iter(all_tags.values()), None)
+    cache = _PRIMARY_CURRENCY_CACHE
+    if cache[0] is sample and cache[1] == len(all_tags):
+        return cache[2]
+    latest_accn, latest_filed = None, ""
+    for data in all_tags.values():
+        for unit, entries in data.get("units", {}).items():
+            for e in entries:
+                if e.get("form") in ("10-K", "20-F", "40-F") and e.get("filed", "") > latest_filed:
+                    latest_accn, latest_filed = e.get("accn"), e["filed"]
+    counts = {}
+    for data in all_tags.values():
+        for unit, entries in data.get("units", {}).items():
+            if _is_currency_code(unit):
+                counts[unit] = counts.get(unit, 0) + sum(1 for e in entries if e.get("accn") == latest_accn)
+    currency = max(sorted(counts), key=counts.get) if counts and max(counts.values()) else None
+    cache[:] = [sample, len(all_tags), currency]
+    return currency
+
+
+def _units_to_read(units, primary):
+    """A tag's units minus any other-currency duplicate of the primary
+    currency — "USD" dropped when "MXN" is there, "USD/shares" when
+    "MXN/shares" is. A tag with no primary-currency version keeps
+    whatever it has."""
+    if not primary:
+        return list(units)
+    def split(unit):
+        head, _, rest = unit.partition("/")
+        return head, rest
+    has_primary = {split(u)[1] for u in units if split(u)[0] == primary}
+    return [u for u in units
+            if not (_is_currency_code(split(u)[0]) and split(u)[0] != primary and split(u)[1] in has_primary)]
+
+
 def _recipe_annual_entries(all_tags, recipe):
     """
     A "recipe" is either a single XBRL tag name (str), or a list/tuple of
@@ -427,7 +485,9 @@ def _recipe_annual_entries(all_tags, recipe):
             return {}
         units = all_tags[tag].get("units", {})
         periods = {}
-        for unit_key in units:  # whatever currency/unit this filer actually reports in — USD, EUR, CAD, shares, ...
+        # whatever currency/unit this filer actually reports in — USD, EUR, CAD, shares, ... —
+        # but only its own currency when a convenience translation sits beside it
+        for unit_key in _units_to_read(units, primary_reporting_currency(all_tags)):
             entries = units[unit_key]
             # If ANY entry for this tag+unit has a "start" date, this is a
             # duration concept for this filer, not an instant one — so an
