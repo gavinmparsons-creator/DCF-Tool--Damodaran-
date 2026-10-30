@@ -1396,6 +1396,8 @@ DAMODARAN_BETAS_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/dataf
 DAMODARAN_HOME_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/home.htm"
 DAMODARAN_COUNTRY_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html"
 DAMODARAN_RATINGS_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ratings.html"
+DAMODARAN_MARGIN_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/margin.html"
+DAMODARAN_ROIC_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/roc.html"
 COUNTRY_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "country_map.json")
 EDGAR_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -1534,6 +1536,40 @@ def parse_damodaran_spreads(page):
             if {"AAA", "BBB", "D"} <= set(spreads) else None)
 
 
+def _parse_industry_column(page, column):
+    """{industry: value} for one percentage column of a Damodaran industry
+    table, found by header name; with the page's "Updated in ..." date.
+    None if the column isn't there."""
+    rows = _html_table_rows(page)
+    header = next((r for r in rows if r and r[0] == "Industry Name"), None)
+    if header is None or column not in header:
+        return None
+    i = header.index(column)
+    values = {}
+    for r in rows:
+        if len(r) > i and r[0] not in ("", "Industry Name"):
+            try:
+                values[r[0]] = float(r[i].rstrip("%")) / 100
+            except ValueError:
+                continue
+    updated = re.search(r"(?i)Updated in ([A-Za-z]+ \d{4})", page)
+    return {"updated": updated.group(1) if updated else "January 2026 dataset",
+            "values": values} if values else None
+
+
+def parse_damodaran_margins(page):
+    """Industry pre-tax operating margin, lease- and R&D-adjusted — the
+    same adjustments this tool makes to EBIT, so a company's margin and
+    the industry's compare like for like."""
+    return _parse_industry_column(page, "Pre-tax Lease & R&D adj Margin")
+
+
+def parse_damodaran_roic(page):
+    """Industry after-tax return on invested capital, lease- and R&D-
+    adjusted (same basis as this tool's invested capital)."""
+    return _parse_industry_column(page, "Lease & R&D adjusted after-tax ROIC")
+
+
 def load_damodaran_data():
     """
     Industry betas and the current implied ERP, from cache when it's
@@ -1561,7 +1597,9 @@ def load_damodaran_data():
     for piece, url, parser in (("betas", DAMODARAN_BETAS_URL, parse_damodaran_betas),
                                ("erp", DAMODARAN_HOME_URL, parse_damodaran_erp),
                                ("countries", DAMODARAN_COUNTRY_URL, parse_damodaran_countries),
-                               ("ratings", DAMODARAN_RATINGS_URL, parse_damodaran_spreads)):
+                               ("ratings", DAMODARAN_RATINGS_URL, parse_damodaran_spreads),
+                               ("margins", DAMODARAN_MARGIN_URL, parse_damodaran_margins),
+                               ("roic", DAMODARAN_ROIC_URL, parse_damodaran_roic)):
         if is_fresh(piece):
             continue
         page = fetch_text_or_none(url)
@@ -1580,7 +1618,7 @@ def load_damodaran_data():
         except OSError:
             pass  # caching is a convenience; the run continues without it
     return {piece: cache[piece]["data"] if piece in cache else None
-            for piece in ("betas", "erp", "countries", "ratings")}
+            for piece in ("betas", "erp", "countries", "ratings", "margins", "roic")}
 
 
 # The US Treasury's daily par yield curve, one CSV per calendar year,
@@ -2147,6 +2185,30 @@ def choose_industries(ticker, sic, sic_description, industries, biotech=False):
     return chosen
 
 
+def industry_average(damodaran, piece, mix):
+    """Revenue-weighted industry figure (margin or ROIC) for the chosen
+    industry mix, with the dataset date; (None, None) if unavailable."""
+    data = (damodaran or {}).get(piece)
+    if not data or not mix or not all(name in data["values"] for name, _ in mix):
+        return None, None
+    return model.weighted_unlevered_beta([(data["values"][n], w) for n, w in mix]), data["updated"]
+
+
+def print_terminal_share(breakdown, years):
+    """Sanity check shared by both DCFs: how much of the value is the
+    terminal value. Returns the share (None when EV isn't positive)."""
+    ev = breakdown["ev"]
+    if ev <= 0:
+        print("  Terminal value share: n/a (enterprise value isn't positive)")
+        return None
+    share = breakdown["pv_terminal"] / ev
+    print(f"  Terminal value share: {share:.0%} of the base value comes from after year {years}"
+          + ("  ⚠ the value rests almost entirely on the long run" if share > 0.85 else ""))
+    if breakdown["pv_explicit"] < 0:
+        print("    (the forecast years are a net cost — the business consumes cash before it pays off)")
+    return share
+
+
 def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, reit=False,
                        cyclical=False):
     """
@@ -2556,6 +2618,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     print(f"  Company's D/E (debt/market cap):    {debt_to_equity:.2f}")
     beta_source = "regression beta (as pulled)"
     industry_beta = None
+    mix = None  # the chosen industry mix, reused by the sanity checks
     if damodaran["betas"]:
         industries = damodaran["betas"]["industries"]
         if fx_currency:
@@ -3222,6 +3285,15 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         print(f"\n  ({qual_adjustment:+.0%} qualitative adjustment applied"
               + (f": {qual_note}" if qual_note else "") + ")")
 
+    # ---- Sanity checks (Damodaran): diagnostics only — they compare what
+    # the valuation implies against arithmetic and published industry
+    # figures and never change a number. ----
+    print(f"\n  Sanity checks (base case)")
+    base_breakdown = model.enterprise_value_multi_stage(
+        fcff, fcff_growth, high_growth_years, fade_years, terminal_growth, discount_rate,
+        base_nopat=terminal_nopat_basis, return_on_new_capital=return_on_new_capital, return_breakdown=True)
+    summary["sanity"] = {"tv_share_dcf": print_terminal_share(base_breakdown, high_growth_years + fade_years)}
+
     # ---- Market-implied growth rate: rather than just showing the
     # mechanical reinvestment-rate-derived growth next to a valuation
     # gap and leaving the reader to guess what would close it, solve
@@ -3544,6 +3616,42 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         summary["narrative"] = {label: narrative_range[label]["value_per_share"] for label in ("low", "base", "high")}
         if narrative_range["ordering_warning"]:
             print(f"\n  ⚠ {narrative_range['ordering_warning']}")
+
+        # ---- Narrative sanity checks (Damodaran): is the story possible?
+        # Diagnostics only — nothing here changes a value. ----
+        print(f"\n  Sanity checks (base case)")
+        narrative_breakdown = model.enterprise_value_narrative(
+            revenue, initial_growth, current_margin, target_margin, tax_rate_path, sales_to_capital,
+            wacc_path, terminal_growth, narrative_years, return_on_new_capital, return_breakdown=True)
+        sanity = summary.setdefault("sanity", {})
+        sanity["tv_share_narrative"] = print_terminal_share(narrative_breakdown, narrative_years)
+        year10_revenue = narrative_path["revenue"][-1]
+        print(f"  Revenue: ${revenue:,.0f} today -> ${year10_revenue:,.0f} in year {narrative_years} "
+              f"({year10_revenue / revenue:.1f}x, {(year10_revenue / revenue) ** (1 / narrative_years) - 1:.1%}/yr)")
+        roic_path = model.narrative_roic_path(invested_capital, narrative_path["reinvestment"],
+                                              narrative_path["ebit"], tax_rate_path)
+        roic_10, final_wacc = roic_path[-1], wacc_path[-1]
+        industry_margin, margin_date = industry_average(damodaran, "margins", mix)
+        industry_roic, roic_date = industry_average(damodaran, "roic", mix)
+        margin_10 = narrative_path["margin"][-1]
+        sanity.update(margin_year10=margin_10, roic_year10=roic_10)
+        print(f"  Year-{narrative_years} operating margin: {margin_10:.1%}" +
+              (f"   industry: {industry_margin:.1%} (Damodaran, {margin_date}, lease & R&D adjusted)"
+               if industry_margin is not None else "   (no industry figure — industry not chosen)"))
+        if industry_margin is not None and industry_margin > 0 and margin_10 > 1.5 * industry_margin:
+            print(f"    ⚠ {margin_10 / industry_margin:.1f}x the industry's margin — the story needs a lasting edge")
+        if roic_10 is None:
+            print("  Year-10 return on capital: n/a (capital in place isn't positive)")
+        else:
+            print(f"  Year-{narrative_years} return on capital: {roic_10:.1%}   vs. WACC {final_wacc:.1%}" +
+                  (f"   industry: {industry_roic:.1%} (Damodaran, lease & R&D adjusted)"
+                   if industry_roic is not None else ""))
+            if roic_10 < final_wacc:
+                print("    ⚠ below the cost of capital — at this point growth is destroying value")
+            elif industry_roic is not None and industry_roic > 0 and roic_10 > 2 * industry_roic:
+                print(f"    ⚠ {roic_10 / industry_roic:.1f}x the industry's return — needs a durable competitive advantage")
+        if industry_margin is not None or industry_roic is not None:
+            print("    (Industry figures are the latest year's, so a cyclical industry at a trough reads low.)")
 
         # ---- Failure-probability overlay: every DCF above (including
         # this narrative one) implicitly assumes the company SURVIVES to

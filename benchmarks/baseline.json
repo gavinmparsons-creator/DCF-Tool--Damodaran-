@@ -18,6 +18,9 @@
     "return_on_new_capital": null,
     "revenue": 466823000000,
     "risk_free_rate": 0.049800000000000004,
+    "sanity": {
+      "tv_share_dcf": 0.751547712778039
+    },
     "share_price": 348.91,
     "shares": 14652746000.0,
     "terminal_growth": 0.025,
@@ -44,6 +47,9 @@
     "return_on_new_capital": null,
     "revenue": 148401000000,
     "risk_free_rate": 0.049800000000000004,
+    "sanity": {
+      "tv_share_dcf": 0.8299462271886423
+    },
     "share_price": 99.54,
     "shares": 2405921784.75,
     "terminal_growth": 0.025,
@@ -80,6 +86,12 @@
     "return_on_new_capital": null,
     "revenue": 42613000000,
     "risk_free_rate": 0.049800000000000004,
+    "sanity": {
+      "margin_year10": 0.05752201735582785,
+      "roic_year10": 0.05790988423884787,
+      "tv_share_dcf": 0.5228195262960519,
+      "tv_share_narrative": 0.5194333282195888
+    },
     "share_price": 33.62,
     "shares": 725781907.0,
     "terminal_growth": 0.025,
@@ -106,6 +118,9 @@
     "return_on_new_capital": null,
     "revenue": 51054000000,
     "risk_free_rate": 0.049800000000000004,
+    "sanity": {
+      "tv_share_dcf": 0.8071524420970303
+    },
     "share_price": 92.82,
     "shares": 4312902335.0,
     "terminal_growth": 0.025,
@@ -132,6 +147,9 @@
     "return_on_new_capital": null,
     "revenue": 49734633000,
     "risk_free_rate": 0.049800000000000004,
+    "sanity": {
+      "tv_share_dcf": 0.7960018526345003
+    },
     "share_price": 62.05,
     "shares": 4166989903.0,
     "terminal_growth": 0.025,
@@ -164,6 +182,9 @@
     "return_on_new_capital": null,
     "revenue": 6054932000,
     "risk_free_rate": 0.049800000000000004,
+    "sanity": {
+      "tv_share_dcf": 0.6882981523894273
+    },
     "share_price": 57.2,
     "shares": 948573033.0,
     "terminal_growth": 0.025,
@@ -190,6 +211,9 @@
     "return_on_new_capital": null,
     "revenue": 5434647000,
     "risk_free_rate": 0.049800000000000004,
+    "sanity": {
+      "tv_share_dcf": null
+    },
     "share_price": 330.27,
     "shares": 352800000.0,
     "terminal_growth": 0.025,
@@ -216,6 +240,9 @@
     "return_on_new_capital": null,
     "revenue": 88268000000,
     "risk_free_rate": 0.049800000000000004,
+    "sanity": {
+      "tv_share_dcf": 0.8062038382395216
+    },
     "share_price": 431.81,
     "shares": 5186504904.2,
     "terminal_growth": 0.025,
@@ -243,6 +270,9 @@
     "return_on_new_capital": null,
     "revenue": 0,
     "risk_free_rate": 0.049800000000000004,
+    "sanity": {
+      "tv_share_dcf": null
+    },
     "share_price": 26.86,
     "shares": 127522189.0,
     "terminal_growth": 0.025,
@@ -269,6 +299,9 @@
     "return_on_new_capital": null,
     "revenue": 735840000000,
     "risk_free_rate": 0.049800000000000004,
+    "sanity": {
+      "tv_share_dcf": 0.8582998350929785
+    },
     "share_price": 121.25,
     "shares": 7957746241.0,
     "terminal_growth": 0.025,
