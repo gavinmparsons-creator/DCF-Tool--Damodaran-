@@ -1002,6 +1002,58 @@ def freshest_instant(facts_json, tag_candidates):
     return val, tag, fy, unit
 
 
+def freshest_ttm(facts_json, tag_candidates):
+    """freshest_annual_value for a flow figure, upgraded to trailing twelve
+    months when a newer 10-Q year-to-date exists. Returns (value, tag,
+    fiscal_year, unit, as_of) — as_of is the TTM end date or None."""
+    val, tag, fy, unit = freshest_annual_value(facts_json, tag_candidates)
+    if val is None or not tag or "+" in tag:
+        return val, tag, fy, unit, None
+    periods = _recipe_annual_entries(_all_taxonomy_tags(facts_json), tag)
+    if periods:
+        ttm, as_of = trailing_twelve_months(facts_json, tag, unit, max(periods), val)
+        if ttm is not None:
+            return ttm, tag, fy, unit, as_of
+    return val, tag, fy, unit, None
+
+
+OPERATING_CASH_FLOW_TAGS = [
+    "NetCashProvidedByUsedInOperatingActivities",
+    "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
+    "CashFlowsFromUsedInOperatingActivities",  # ifrs-full
+    "CashFlowsFromUsedInOperatingActivitiesContinuingOperations",  # ifrs-full
+]
+STOCK_COMPENSATION_TAGS = [
+    "ShareBasedCompensation",
+    "AllocatedShareBasedCompensationExpense",
+    "AdjustmentsForSharebasedPayments",  # ifrs-full
+]
+
+
+def reported_cash_flow(facts_json, capex, fx_currency, fx_rate):
+    """
+    The company's actual cash generation, from its cash-flow statement:
+    operating cash flow - stock-based compensation - capex, trailing twelve
+    months where a newer 10-Q exists. Stock compensation is added back in
+    operating cash flow but is a real expense (Damodaran), so it comes
+    back out. Working capital — e.g. customers paying in advance — is in
+    it as reported (Roblox: +$1.8B operating cash flow on an operating loss).
+    Returns (cash_flow, description) or (None, None) without operating cash flow.
+    """
+    ocf, ocf_tag, ocf_fy, ocf_unit, ocf_asof = freshest_ttm(facts_json, OPERATING_CASH_FLOW_TAGS)
+    if ocf is None:
+        return None, None
+    sbc, _, sbc_fy, sbc_unit, _ = freshest_ttm(facts_json, STOCK_COMPENSATION_TAGS)
+    if sbc is None or sbc_fy is None or sbc_fy < ocf_fy:
+        sbc, sbc_unit = 0.0, None  # not reported for the same year — none subtracted
+    def usd(val, unit):
+        return val * fx_rate if fx_currency and unit == fx_currency else val
+    ocf, sbc = usd(ocf, ocf_unit), usd(sbc, sbc_unit)
+    period = f"TTM to {ocf_asof}" if ocf_asof else f"FY{ocf_fy}"
+    return ocf - sbc - capex, (f"operating cash flow ${ocf:,.0f} - stock compensation ${sbc:,.0f} "
+                               f"- capex ${capex:,.0f} ({period})")
+
+
 # Which METRIC_TAGS entries are flows (TTM) vs balance-sheet instants
 # (latest quarter). Interest expense and R&D stay annual: both are
 # re-pulled with their own multi-year logic elsewhere (the synthetic
@@ -3939,9 +3991,20 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         print(f"\n{'='*60}")
         print("  Failure-probability overlay")
         print(f"{'='*60}")
-        current_burn_rate = -fcff if fcff < 0 else 0.0
+        # Burn is measured from the cash-flow statement, not the DCF's FCFF:
+        # FCFF here counts R&D as investment and leaves out working capital,
+        # so it can show a burn for a company whose cash is actually growing
+        # (Roblox: FCFF -$1.2B, cash flow after stock compensation positive).
+        actual_cash_flow, cash_flow_note = reported_cash_flow(
+            facts, financials.get("capex", {}).get("value") or 0.0, fx_currency, fx_rate)
+        if actual_cash_flow is not None:
+            print(f"  Cash flow: ${actual_cash_flow:,.0f} = {cash_flow_note}")
+            current_burn_rate = -actual_cash_flow if actual_cash_flow < 0 else 0.0
+        else:
+            print("  No operating cash flow reported — using the DCF's base-year FCFF as the burn.")
+            current_burn_rate = -fcff if fcff < 0 else 0.0
         runway = model.estimate_runway_years(cash, current_burn_rate)
-        runway_display = f"{runway:.1f} years" if runway != float("inf") else "N/A (current FCFF isn't negative)"
+        runway_display = f"{runway:.1f} years" if runway != float("inf") else "N/A (not burning cash)"
         print(f"  Cash: ${cash:,.0f}   Current annual burn rate: ${current_burn_rate:,.0f}   Runway: {runway_display}")
         default_failure_prob = model.failure_probability_from_runway(runway)
         print(f"  Runway-implied failure probability (illustrative table — there's no published")
