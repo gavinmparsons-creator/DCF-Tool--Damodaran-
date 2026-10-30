@@ -522,7 +522,8 @@ def project_fcff_multi_stage(base_fcff, high_growth_rate, high_growth_years,
 
 def enterprise_value_multi_stage(base_fcff, high_growth_rate, high_growth_years,
                                   fade_years, terminal_growth_rate, discount_rate,
-                                  base_nopat=None, return_on_new_capital=None, return_breakdown=False):
+                                  base_nopat=None, return_on_new_capital=None, return_breakdown=False,
+                                  base_revenue=None, working_capital_ratio=0.0):
     """
     Full three-stage DCF: project FCFF through the high-growth and fade
     stages, discount each year back, add the discounted Gordon Growth
@@ -537,11 +538,24 @@ def enterprise_value_multi_stage(base_fcff, high_growth_rate, high_growth_years,
 
     return_breakdown=True returns {"ev", "pv_explicit", "pv_terminal"}
     instead of the bare EV — for the terminal-value-share sanity check.
+
+    Working capital (Damodaran): with base_revenue and a non-cash
+    working-capital ratio (% of revenue) given, each explicit year's FCFF
+    is reduced by ratio x that year's revenue increase — revenue grows
+    along the same path as FCFF. A negative ratio (paid before
+    delivering) makes growth release cash. The consistent terminal value
+    needs no separate term: its reinvestment = g / RONIC covers all
+    reinvestment, working capital included.
     """
     projected = project_fcff_multi_stage(base_fcff, high_growth_rate, high_growth_years,
                                           fade_years, terminal_growth_rate)
     if not projected:
         raise ValueError("high_growth_years + fade_years must be at least 1")
+    if base_revenue and working_capital_ratio:
+        revenue_path = [base_revenue] + project_fcff_multi_stage(base_revenue, high_growth_rate, high_growth_years,
+                                                                 fade_years, terminal_growth_rate)
+        projected = [fcff - working_capital_ratio * (revenue_path[t + 1] - revenue_path[t])
+                     for t, fcff in enumerate(projected)]
 
     discounted = discount_cash_flows(projected, discount_rate)
     pv_of_explicit_period = sum(discounted)
@@ -566,13 +580,15 @@ def run_valuation_range_multi_stage(base_fcff, high_growth_rate, high_growth_yea
                                      fade_years, discount_rate, terminal_growth_rate,
                                      total_debt, cash, shares_outstanding,
                                      wacc_spread=0.01, growth_spread=0.005,
-                                     base_nopat=None, return_on_new_capital=None):
+                                     base_nopat=None, return_on_new_capital=None,
+                                     base_revenue=None, working_capital_ratio=0.0):
     """
     Same low/base/high sensitivity range as run_valuation_range, but off
     the three-stage (high growth -> fade -> terminal) FCFF projection
     instead of one flat growth rate for the whole explicit period.
-    base_nopat / return_on_new_capital: see enterprise_value_multi_stage
-    (a None return_on_new_capital means each scenario's own WACC).
+    base_nopat / return_on_new_capital / base_revenue / working_capital_ratio:
+    see enterprise_value_multi_stage (a None return_on_new_capital means
+    each scenario's own WACC).
     """
     scenarios = {
         "low":  (discount_rate + wacc_spread, terminal_growth_rate - growth_spread),
@@ -583,7 +599,8 @@ def run_valuation_range_multi_stage(base_fcff, high_growth_rate, high_growth_yea
     results = {}
     for label, (dr, tgr) in scenarios.items():
         ev = enterprise_value_multi_stage(base_fcff, high_growth_rate, high_growth_years,
-                                           fade_years, tgr, dr, base_nopat, return_on_new_capital)
+                                           fade_years, tgr, dr, base_nopat, return_on_new_capital,
+                                           base_revenue=base_revenue, working_capital_ratio=working_capital_ratio)
         per_share, equity_val = equity_value_per_share(ev, total_debt, cash, shares_outstanding)
         results[label] = {
             "discount_rate": dr,
@@ -599,7 +616,8 @@ def solve_implied_growth_rate(target_price, base_fcff, high_growth_years, fade_y
                                discount_rate, terminal_growth_rate,
                                total_debt, cash, shares_outstanding,
                                lo=-0.95, hi=5.0, iterations=200,
-                               base_nopat=None, return_on_new_capital=None):
+                               base_nopat=None, return_on_new_capital=None,
+                               base_revenue=None, working_capital_ratio=0.0):
     """
     Binary-search for the high-growth-stage rate that makes the per-share
     DCF value equal target_price, holding WACC, terminal growth, stage
@@ -623,7 +641,8 @@ def solve_implied_growth_rate(target_price, base_fcff, high_growth_years, fade_y
     def price_for_growth(g):
         ev = enterprise_value_multi_stage(base_fcff, g, high_growth_years, fade_years,
                                            terminal_growth_rate, discount_rate,
-                                           base_nopat, return_on_new_capital)
+                                           base_nopat, return_on_new_capital,
+                                           base_revenue=base_revenue, working_capital_ratio=working_capital_ratio)
         per_share, _ = equity_value_per_share(ev, total_debt, cash, shares_outstanding)
         return per_share
 
@@ -2255,6 +2274,17 @@ if __name__ == "__main__":
     #   FCFF path [105, 110.25]; NOPAT_2 = 150 x 1.05^2 = 165.375
     #   TV = 165.375 x 1.02 x (1 - 0.02/0.10) / 0.08 = 1686.825
     #   EV = 105/1.1 + 110.25/1.21 + 1686.825/1.21
+    # Working capital, worked by hand: FCFF 100 growing 5% for 2 years, revenue
+    # 1000 -> 1050 -> 1102.5, 10% of revenue tied up in working capital, so
+    # year-1 FCFF 105 - 0.10 x 50 = 100, year-2 110.25 - 0.10 x 52.5 = 105.
+    # The consistent terminal value (from NOPAT) is unchanged.
+    wc_bd = enterprise_value_multi_stage(100, 0.05, 2, 0, 0.02, 0.10, base_nopat=150, return_breakdown=True,
+                                         base_revenue=1000, working_capital_ratio=0.10)
+    assert abs(wc_bd["pv_explicit"] - (100 / 1.10 + 105 / 1.10 ** 2)) < 1e-9
+    assert abs(wc_bd["pv_terminal"] - bd["pv_terminal"]) < 1e-9
+    # A negative ratio releases cash as revenue grows.
+    assert enterprise_value_multi_stage(100, 0.05, 2, 0, 0.02, 0.10, base_nopat=150, base_revenue=1000,
+                                        working_capital_ratio=-0.10) > bd["ev"]
     ev_consistent = enterprise_value_multi_stage(100, 0.05, 2, 0, 0.02, 0.10, base_nopat=150)
     expected_ev_consistent = 105 / 1.1 + 110.25 / 1.21 + 1686.825 / 1.21
     print(f"Multi-stage EV, consistent TV: {ev_consistent:.4f}  (expected {expected_ev_consistent:.4f})")
