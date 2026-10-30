@@ -2904,10 +2904,17 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     invested_capital = total_debt + book_equity - cash
     if rd_result is not None:
         invested_capital += rd_result["research_asset"]
+    # Growth = reinvestment rate x ROIC only means something when the
+    # company earns a profit on positive capital. With negative NOPAT both
+    # factors turn negative and multiply into a large POSITIVE "growth"
+    # (Roblox: -176% x -29% = +51%; Viking: +140%) — an artifact of signs.
+    # For a money-loser growth has to come from a revenue story instead
+    # (the narrative DCF), so nothing is offered as derived.
+    growth_undefined = nopat <= 0 or invested_capital <= 0
     try:
         reinvestment_rate = model.compute_reinvestment_rate(capex, d_and_a, 0, nopat)
         roic = model.compute_roic(nopat, invested_capital)
-        implied_growth = model.implied_growth_rate(reinvestment_rate, roic)
+        implied_growth = 0.0 if growth_undefined else model.implied_growth_rate(reinvestment_rate, roic)
     except (ZeroDivisionError, ValueError):
         reinvestment_rate = roic = None
         implied_growth = DEFAULT_FCFF_GROWTH
@@ -2920,7 +2927,15 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
               + ("  [both R&D-adjusted]" if rd_result is not None else ""))
         print(f"  ROIC:               {roic:.2%}   NOPAT / Invested Capital"
               + ("  [includes research asset]" if rd_result is not None else ""))
-        print(f"  Implied growth:     {implied_growth:.2%}   Reinvestment rate x ROIC")
+        if growth_undefined:
+            print("  Implied growth:     not meaningful — " +
+                  ("NOPAT is negative" if nopat <= 0 else "invested capital is negative") +
+                  ", so reinvestment rate x ROIC")
+            print("  multiplies two negatives into a spurious positive. Growth for a company that")
+            print("  isn't yet profitable has to come from a revenue story: use --narrative.")
+            print("  Defaulting to 0% (no growth assumed) for this DCF.")
+        else:
+            print(f"  Implied growth:     {implied_growth:.2%}   Reinvestment rate x ROIC")
     else:
         print(f"  Could not compute (missing invested capital or NOPAT) —")
         print(f"  falling back to flat default of {DEFAULT_FCFF_GROWTH:.2%}")
