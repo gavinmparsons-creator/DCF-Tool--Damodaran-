@@ -4,3 +4,4 @@ __pycache__/
 data/damodaran_cache.json
 benchmarks/logs/
 benchmarks/results/
+research/data/
