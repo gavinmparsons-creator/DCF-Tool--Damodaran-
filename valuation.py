@@ -1921,6 +1921,36 @@ def latest_annual_filing(cik):
         return None, None
 
 
+def warn_if_edgar_data_lags(cik, financials):
+    """
+    Warn when the company has filed a newer annual report than the one
+    the numbers came from. SEC's companyfacts (where every figure here
+    comes from) can lag a filing by months — FEMSA's and TSMC's FY2025
+    20-Fs, filed April 2026, were still missing from it in October — and
+    since every figure is then equally old, the per-metric staleness
+    check can't see it. Compares the latest 10-K/20-F/40-F's period in
+    EDGAR's filing index with the statements' fiscal year. Returns True
+    if it warned.
+    """
+    data = fetch_json_or_none(EDGAR_SUBMISSIONS_URL.format(cik=cik))
+    try:
+        recent = data["filings"]["recent"]
+        i = next(i for i, f in enumerate(recent["form"]) if f in ("10-K",) + FOREIGN_ANNUAL_FORMS)
+        form, report_date, filed = recent["form"][i], recent["reportDate"][i], recent["filingDate"][i]
+    except (TypeError, KeyError, StopIteration):
+        return False
+    years = [info["fiscal_year"] for info in financials.values()
+             if info["fiscal_year"] is not None and info.get("tag") != "EntityCommonStockSharesOutstanding"]
+    filing_fy = _fiscal_year_of_period({"end": report_date})
+    if not years or not report_date or filing_fy is None or filing_fy <= max(years):
+        return False
+    print(f"  ⚠⚠ WARNING — EDGAR's data is behind the company's filings: the latest {form}")
+    print(f"     (FY{filing_fy}, period ending {report_date}, filed {filed}) isn't in SEC's XBRL data yet,")
+    print(f"     so these figures are from FY{max(years)}. Check the key figures against the new {form}")
+    print("     and type corrections where asked below, or treat this valuation as a year old.")
+    return True
+
+
 def adr_ratio_candidates(filing_url):
     """Every 'ADS ... represents N ordinary/common shares' number in the
     filing, as {ratio: times mentioned}. Large filings (BP's 20-F is
@@ -2342,6 +2372,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
               f"{fx_rate:.4f} ({note}) to match the USD market data below.")
         convert_financials_to_usd(financials, fx_currency, fx_rate)
     missing, stale = print_financials_report(company_name, financials)
+    warn_if_edgar_data_lags(cik, financials)
 
     print(f"{'='*60}")
     print("  Market data")
