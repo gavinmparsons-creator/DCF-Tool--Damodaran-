@@ -1096,17 +1096,23 @@ def get_market_data(ticker):
     key, rate limit, network issue, missing field) — the script always
     produces a result, it never hard-fails just because a market-data
     source had a problem.
+
+    A price with no beta is accepted (beta returned as None): Yahoo has
+    no beta for some ADRs (FEMSA), and the beta the valuation uses is
+    Damodaran's industry beta anyway — the company's own regression beta
+    is only shown for comparison.
     """
     if YFINANCE_AVAILABLE:
         try:
             info = yf.Ticker(ticker).info
             beta = info.get("beta")
             price = info.get("currentPrice") or info.get("regularMarketPrice")
-            if beta is not None and price is not None:
-                print(f"  Pulled from yfinance: beta={beta}, share price=${price}")
-                return float(beta), float(price)
+            if price is not None:
+                print(f"  Pulled from yfinance: beta={beta if beta is not None else 'not available'}, "
+                      f"share price=${price}")
+                return (float(beta) if beta is not None else None), float(price)
             else:
-                print("  yfinance response was missing beta or price — trying next source.")
+                print("  yfinance response was missing the share price — trying next source.")
         except Exception as e:
             print(f"  yfinance request failed ({e}) — trying next source.")
 
@@ -1120,11 +1126,12 @@ def get_market_data(ticker):
                 profile = data[0]
                 beta = profile.get("beta")
                 price = profile.get("price")
-                if beta is not None and price is not None:
-                    print(f"  Pulled from FMP: beta={beta}, share price=${price}")
-                    return float(beta), float(price)
+                if price is not None:
+                    print(f"  Pulled from FMP: beta={beta if beta is not None else 'not available'}, "
+                          f"share price=${price}")
+                    return (float(beta) if beta is not None else None), float(price)
                 else:
-                    print("  FMP response was missing beta or price — falling back to manual entry.")
+                    print("  FMP response was missing the share price — falling back to manual entry.")
             else:
                 print("  FMP returned no data for this ticker — falling back to manual entry.")
         except HTTPError as e:
@@ -1136,7 +1143,9 @@ def get_market_data(ticker):
 
     # Manual fallback
     print(f"  Look up '{ticker.upper()}' on Yahoo Finance or Google Finance for these:")
-    beta = prompt_number("  Enter beta (e.g. 1.2): ")
+    beta = prompt_number("  Enter beta (e.g. 1.2), or press Enter to skip (the industry beta is used anyway): ",
+                         default="")
+    beta = None if beta == "" else beta
     price = prompt_number("  Enter current share price (e.g. 185.50): ")
     return beta, price
 
@@ -2575,9 +2584,14 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     # leases). Finance leases are left alone: many filers already fold
     # them into long-term debt, so adding them could double count. ----
     lease_liability, lease_interest = 0.0, 0.0
-    latest_fy_all = max(info["fiscal_year"] for info in financials.values() if info["fiscal_year"] is not None)
-    ll_val, ll_tag, ll_fy, ll_unit = freshest_instant(facts, ["OperatingLeaseLiability"])
-    if ll_val is None or ll_fy < latest_fy_all:
+    fiscal_years_seen = [info["fiscal_year"] for info in financials.values() if info["fiscal_year"] is not None]
+    # None when every metric was manually entered (e.g. a brand-new IPO with no
+    # EDGAR data at all yet) — there's no freshness baseline to compare a lease
+    # tag against, and no EDGAR lease data to find anyway, so skip this block.
+    latest_fy_all = max(fiscal_years_seen) if fiscal_years_seen else None
+    ll_val, ll_tag, ll_fy, ll_unit = (None, None, None, None) if latest_fy_all is None else \
+        freshest_instant(facts, ["OperatingLeaseLiability"])
+    if latest_fy_all is not None and (ll_val is None or ll_fy < latest_fy_all):
         parts = [freshest_instant(facts, [t]) for t in
                  ("OperatingLeaseLiabilityCurrent", "OperatingLeaseLiabilityNoncurrent")]
         if all(v is not None and fy is not None and fy >= latest_fy_all for v, _, fy, _ in parts):
@@ -2674,7 +2688,8 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     print(f"\n{'='*60}")
     print("  Beta (bottom-up, Damodaran industry average)")
     print(f"{'='*60}")
-    print(f"  Regression beta (from market data): {regression_beta:.2f}  — one company's, noisy")
+    print("  Regression beta (from market data): " + (f"{regression_beta:.2f}  — one company's, noisy"
+                                                       if regression_beta is not None else "not available"))
     print(f"  Company's D/E (debt/market cap):    {debt_to_equity:.2f}")
     beta_source = "regression beta (as pulled)"
     industry_beta = None
@@ -2701,9 +2716,15 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     else:
         print("  Damodaran's industry betas couldn't be loaded (no connection and no cache).")
 
-    if industry_beta is not None:
+    if industry_beta is not None and regression_beta is None:
+        answer = input(f"  Press Enter to use the industry beta {industry_beta:.2f}, or type an UNLEVERED beta\n"
+                       "  to relever instead: ").strip().lower()
+        answer = "" if answer == "r" else answer
+    elif industry_beta is not None:
         answer = input(f"  Press Enter to use the industry beta {industry_beta:.2f}, type r for the regression\n"
                        "  beta, or type an UNLEVERED beta to relever instead: ").strip().lower()
+    elif regression_beta is None:
+        answer = str(prompt_number("  No industry or regression beta — type an UNLEVERED beta to relever: "))
     else:
         answer = input("  Press Enter to use the regression beta, or type an UNLEVERED beta to\n"
                        "  relever instead: ").strip().lower()
