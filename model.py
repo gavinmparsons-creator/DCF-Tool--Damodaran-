@@ -1149,27 +1149,53 @@ def ordering_warning_for_range(low_value, base_value, high_value):
 # prices business/market risk, not "this specific company might run out
 # of cash and cease to exist entirely," which is a real and separate
 # risk for a young, cash-burning company. Damodaran's fix: estimate the
-# probability of failure from cash burn and runway, then blend the
-# going-concern value with a distressed liquidation value.
+# probability of failure (from the company's bond rating, or for a young
+# company its age), then blend the going-concern value with a distressed
+# liquidation value.
 # ---------------------------------------------------------------------
 
-# (min_runway_years, probability_of_failure) tuples, DESCENDING runway
-# order — the first threshold the company's own runway meets or exceeds
-# wins, same table-lookup shape as synthetic_credit_rating. ILLUSTRATIVE:
-# unlike the bond-rating spread table (which at least loosely tracks
-# real credit-spread bands), there's no published "runway -> failure
-# probability" standard to anchor this to — treat it as a reasonable
-# monotonic starting point (more runway = lower risk, strictly), and
-# override it with sector-specific judgment or your own data when you
-# have it, the same way you would the spread table above.
-FAILURE_PROBABILITY_TABLE = [
-    (5.0, 0.02),
-    (3.0, 0.05),
-    (2.0, 0.10),
-    (1.0, 0.20),
-    (0.5, 0.35),
-    (0.0, 0.50),
-]
+# Probability that a company with a given bond rating defaults within
+# 10 years (the narrative DCF's horizon), from Damodaran's Ginzu
+# spreadsheet (fcffsimpleginzu.xlsx, "Failure Rate worksheet", April 2026
+# version) — his first approach to the probability of failure. His own
+# example: a BB-rated firm has an 11.78% chance of failing. Keyed by the
+# broad rating bucket; notches (BB+, Ba1) share their bucket's rate.
+RATING_DEFAULT_PROBABILITY_10YR = {
+    "AAA": 0.0070, "AA": 0.0072, "A": 0.0124, "BBB": 0.0332,
+    "BB": 0.1178, "B": 0.2374, "CCC/C": 0.5038,
+}
+RATING_DEFAULT_SOURCE = "Damodaran's Ginzu failure-rate worksheet, April 2026"
+
+_MOODYS_TO_SP = {"AAA": "AAA", "AA": "AA", "A": "A", "BAA": "BBB", "BA": "BB", "B": "B",
+                 "CAA": "CCC/C", "CA": "CCC/C", "C": "CCC/C"}
+
+
+def rating_bucket(rating):
+    """
+    The broad rating bucket for an S&P- or Moody's-style rating — "BB+",
+    "Ba1", "Ba2/BB" (the tool's own labels), "CCC-" — as a key of
+    RATING_DEFAULT_PROBABILITY_10YR, "D" for a rating already in default,
+    or None if it can't be read.
+    """
+    text = (rating or "").strip().split("/")[-1].strip()
+    if not text:
+        return None
+    head = text.rstrip("+-0123456789").upper()
+    if head == "D":
+        return "D"
+    if head in ("CCC", "CC", "C"):
+        return "CCC/C"
+    if head in ("AAA", "AA", "A", "BBB", "BB", "B"):
+        return head
+    return _MOODYS_TO_SP.get(head)
+
+
+def failure_probability_from_rating(rating):
+    """10-year default probability for a bond rating (see
+    RATING_DEFAULT_PROBABILITY_10YR), or None for a D rating (already in
+    default — not a going-concern rating) or an unreadable one."""
+    bucket = rating_bucket(rating)
+    return RATING_DEFAULT_PROBABILITY_10YR.get(bucket) if bucket and bucket != "D" else None
 
 
 def estimate_runway_years(cash, annual_burn_rate):
@@ -1182,21 +1208,6 @@ def estimate_runway_years(cash, annual_burn_rate):
     if annual_burn_rate <= 0:
         return float("inf")
     return cash / annual_burn_rate
-
-
-def failure_probability_from_runway(runway_years, table=None):
-    """
-    Table lookup: runway -> probability of failure (see
-    FAILURE_PROBABILITY_TABLE's docstring on why this is illustrative,
-    not an authoritative standard). An infinite runway (no cash burn)
-    naturally lands in the longest-runway, lowest-probability bucket.
-    """
-    if table is None:
-        table = FAILURE_PROBABILITY_TABLE
-    for min_runway, probability in table:
-        if runway_years >= min_runway:
-            return probability
-    return table[-1][1]
 
 
 def failure_adjusted_value_per_share(going_concern_value_per_share, probability_of_failure,
@@ -1248,8 +1259,7 @@ def failure_adjusted_value_per_share(going_concern_value_per_share, probability_
 # Success Rates 2011-2020" (all-indication averages: P1->P2 52.0%,
 # P2->P3 28.9%, P3->filing 57.8%, filing->approval 90.6%). Preclinical
 # has no comparable published figure in that study; 5% is a rough
-# placeholder. ILLUSTRATIVE averages, same caveat as the spread and
-# runway tables above: oncology runs well below these, hematology and
+# placeholder. ILLUSTRATIVE averages: oncology runs well below these, hematology and
 # rare-disease programs with validated biology well above — override
 # with indication-specific rates when you have them.
 PHASE_APPROVAL_PROBABILITY = {
@@ -2069,22 +2079,18 @@ if __name__ == "__main__":
     assert estimate_runway_years(100, 0) == float("inf"), "Zero burn rate must mean infinite runway!"
     assert estimate_runway_years(100, -50) == float("inf"), "A negative 'burn rate' (i.e. positive FCFF) must mean infinite runway!"
 
-    # failure_probability_from_runway: exact threshold boundaries.
-    assert failure_probability_from_runway(5.0) == 0.02, "Runway exactly at a threshold must hit that threshold's bucket!"
-    assert failure_probability_from_runway(4.9) == 0.05, "Just under a threshold must fall to the NEXT (higher-probability) bucket!"
-    assert failure_probability_from_runway(0.3) == 0.50, "Very short runway must hit the worst (highest-probability) bucket!"
-    assert failure_probability_from_runway(float("inf")) == 0.02, "Infinite runway must hit the best (lowest-probability) bucket!"
-    print(f"Failure probability at runway=4.0yr: {failure_probability_from_runway(4.0):.0%}  "
-          f"(expected {0.05:.0%})")
-    assert failure_probability_from_runway(4.0) == 0.05, "Runway lookup mismatch at 4.0 years!"
-
-    # The table itself must be monotonic: more runway can never mean a
-    # HIGHER failure probability than less runway — if someone edits the
-    # table later, this catches a broken ordering immediately.
-    sorted_table = sorted(FAILURE_PROBABILITY_TABLE, key=lambda pair: pair[0])
-    for (shorter_runway, higher_or_equal_prob), (longer_runway, lower_or_equal_prob) in zip(sorted_table, sorted_table[1:]):
-        assert higher_or_equal_prob >= lower_or_equal_prob, \
-            "FAILURE_PROBABILITY_TABLE must be monotonic — more runway can't mean a higher failure probability!"
+    # failure_probability_from_rating: Damodaran's own example (BB -> 11.78%),
+    # notches and Moody's labels share their bucket, D and junk -> None.
+    assert failure_probability_from_rating("BB") == 0.1178
+    assert failure_probability_from_rating("BB+") == failure_probability_from_rating("Ba1") == 0.1178
+    assert failure_probability_from_rating("Ba2/BB") == 0.1178  # the synthetic-rating label style
+    assert failure_probability_from_rating("Baa2") == 0.0332
+    assert failure_probability_from_rating("CCC-") == failure_probability_from_rating("Caa1") == 0.5038
+    assert failure_probability_from_rating("D") is None and failure_probability_from_rating("xyz") is None
+    # Lower ratings never mean a lower default probability.
+    ordered = [RATING_DEFAULT_PROBABILITY_10YR[r] for r in ("AAA", "AA", "A", "BBB", "BB", "B", "CCC/C")]
+    assert ordered == sorted(ordered), "Default probabilities must rise as the rating falls!"
+    print(f"Failure probability for a BB rating: {failure_probability_from_rating('BB'):.2%}  (expected 11.78%)")
 
     # failure_adjusted_value_per_share: going_concern=$10/share, P(fail)=20%,
     # book_equity=$500, shares=100, haircut=50%.
