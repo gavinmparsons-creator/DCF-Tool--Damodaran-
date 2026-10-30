@@ -2605,7 +2605,14 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     # coverage below includes that lease interest too. Matters most for
     # retailers, restaurants and airlines (Walmart: $15.6B of operating
     # leases). Finance leases are left alone: many filers already fold
-    # them into long-term debt, so adding them could double count. ----
+    # them into long-term debt, so adding them could double count.
+    #
+    # IFRS filers (IFRS 16) report every lease this way already: the
+    # lease cost is split into depreciation (in operating profit) and
+    # interest (in finance costs), so operating profit already excludes
+    # the interest and the interest expense already includes it. Only the
+    # liability is added to debt — no EBIT add-back, no extra coverage
+    # interest, or the lease interest would be counted twice. ----
     lease_liability, lease_interest = 0.0, 0.0
     # The cover-page share count is dated after year-end (TSMC's FY2025
     # 20-F cover, while SEC still only has its FY2024 statements), so it
@@ -2625,9 +2632,26 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         if all(v is not None and fy is not None and fy >= latest_fy_all for v, _, fy, _ in parts):
             ll_val, ll_tag, ll_fy, ll_unit = (sum(v for v, _, _, _ in parts),
                                               "OperatingLeaseLiabilityCurrent+Noncurrent", parts[0][2], parts[0][3])
+    ifrs_leases = False
+    if latest_fy_all is not None and (ll_val is None or ll_fy < latest_fy_all):
+        i_val, i_tag, i_fy, i_unit = freshest_instant(
+            facts, ["LeaseLiabilities", ("CurrentLeaseLiabilities", "NoncurrentLeaseLiabilities")])
+        if i_val and i_fy is not None and i_fy >= latest_fy_all:
+            ll_val, ll_tag, ll_fy, ll_unit, ifrs_leases = i_val, i_tag, i_fy, i_unit, True
     if ll_val and ll_fy is not None and ll_fy >= latest_fy_all:
         if fx_currency and ll_unit == fx_currency:
             ll_val *= fx_rate
+    if ifrs_leases:
+        print(f"\n{'='*60}")
+        print("  Leases (treated as debt, Damodaran-style — IFRS 16)")
+        print(f"{'='*60}")
+        print(f"  Lease liabilities: ${ll_val:,.0f}  (tag: {ll_tag}, FY{ll_fy})")
+        print("  -> debt +${:,.0f}. No EBIT add-back: under IFRS 16 operating profit already".format(ll_val))
+        print("  excludes lease interest, and interest expense already includes it.")
+        if input("  Press Enter to include leases, or type n to leave them out: ").strip().lower() != "n":
+            lease_liability = ll_val
+            total_debt += lease_liability
+    elif ll_val and ll_fy is not None and ll_fy >= latest_fy_all:
         rate_val, _, rate_fy, _ = freshest_annual_value(facts, ["OperatingLeaseWeightedAverageDiscountRatePercent"])
         if rate_val and rate_fy is not None and rate_fy >= latest_fy_all and 0 < rate_val < 0.30:
             lease_rate, rate_note = rate_val, "the company's disclosed lease discount rate"
@@ -3337,8 +3361,9 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     print(f"  Assumed terminal growth:   {terminal_growth:.2%}  (type an override above to change)")
     print(f"  Return on new capital:     {ronic_label}  (stable-growth reinvestment = g / this)")
     if lease_liability:
-        print(f"  Operating leases:          ${lease_liability:,.0f} added to debt, "
-              f"${lease_interest:,.0f} added back to EBIT")
+        print(f"  Leases:                    ${lease_liability:,.0f} added to debt, " +
+              ("no EBIT add-back (IFRS 16: already excluded)" if ifrs_leases
+               else f"${lease_interest:,.0f} added back to EBIT"))
     print(f"  Equity bridge:             claims beyond debt ${bridge_debt - total_debt:,.0f}, "
           f"non-operating assets beyond cash ${equity_investments:,.0f}, "
           f"{other_dilution_shares:,.0f} extra shares")
