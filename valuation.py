@@ -1101,6 +1101,8 @@ def apply_latest_quarter(facts_json, financials):
 TOTAL_DEBT_TAGS = [
     "LongTermDebt",
     "DebtLongtermAndShorttermCombinedAmount",
+    "LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities",  # e.g. Air Products ($17.7B, FY2025)
+    "DebtAndCapitalLeaseObligations",
     "LongTermDebtNoncurrent",
     "NotesPayable",
     "ConvertibleNotesPayable",
