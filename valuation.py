@@ -1513,6 +1513,7 @@ DAMODARAN_HOME_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/home.h
 DAMODARAN_COUNTRY_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html"
 DAMODARAN_RATINGS_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ratings.html"
 DAMODARAN_MARGIN_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/margin.html"
+DAMODARAN_WC_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/wcdata.html"
 DAMODARAN_ROIC_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/roc.html"
 COUNTRY_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "country_map.json")
 EDGAR_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
@@ -1686,6 +1687,12 @@ def parse_damodaran_roic(page):
     return _parse_industry_column(page, "Lease & R&D adjusted after-tax ROIC")
 
 
+def parse_damodaran_working_capital(page):
+    """Industry non-cash working capital as a share of revenue
+    (receivables + inventory - payables, cash and debt excluded)."""
+    return _parse_industry_column(page, "Non-cash WC/ Sales")
+
+
 def load_damodaran_data():
     """
     Industry betas and the current implied ERP, from cache when it's
@@ -1715,7 +1722,8 @@ def load_damodaran_data():
                                ("countries", DAMODARAN_COUNTRY_URL, parse_damodaran_countries),
                                ("ratings", DAMODARAN_RATINGS_URL, parse_damodaran_spreads),
                                ("margins", DAMODARAN_MARGIN_URL, parse_damodaran_margins),
-                               ("roic", DAMODARAN_ROIC_URL, parse_damodaran_roic)):
+                               ("roic", DAMODARAN_ROIC_URL, parse_damodaran_roic),
+                               ("wc", DAMODARAN_WC_URL, parse_damodaran_working_capital)):
         if is_fresh(piece):
             continue
         page = fetch_text_or_none(url)
@@ -1734,7 +1742,7 @@ def load_damodaran_data():
         except OSError:
             pass  # caching is a convenience; the run continues without it
     return {piece: cache[piece]["data"] if piece in cache else None
-            for piece in ("betas", "erp", "countries", "ratings", "margins", "roic")}
+            for piece in ("betas", "erp", "countries", "ratings", "margins", "roic", "wc")}
 
 
 # The US Treasury's daily par yield curve, one CSV per calendar year,
@@ -2935,8 +2943,43 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     # For a money-loser growth has to come from a revenue story instead
     # (the narrative DCF), so nothing is offered as derived.
     growth_undefined = nopat <= 0 or invested_capital <= 0
+
+    # ---- Working capital (Damodaran): non-cash working capital (receivables
+    # + inventory - payables) is reinvestment, like net capex — revenue
+    # growth ties more of it up (or, paid in advance, releases it). A single
+    # company's year-to-year change is noisy, so the ratio is his industry
+    # figure for the chosen mix, applied to revenue growth. ----
+    wc_ratio, wc_updated = industry_average(damodaran, "wc", mix)
+    print(f"\n{'='*60}")
+    print("  Working capital (non-cash, as % of revenue)")
+    print(f"{'='*60}")
+    if wc_ratio is not None:
+        print(f"  Industry: {wc_ratio:.1%}  ({' + '.join(n for n, _ in mix)}; Damodaran, {wc_updated})")
+        print("  Each year's revenue increase ties up this share of it in receivables and")
+        print("  inventory net of payables (a negative figure means growth releases cash).")
+        wc_ratio = prompt_number(f"  Press Enter to use {wc_ratio:.1%}, or type a percent (e.g. 5 for 5%): ",
+                                 default=wc_ratio * 100) / 100
+    else:
+        print("  No industry figure available for this company's industry mix.")
+        wc_ratio = prompt_number("  Type a percent of revenue, or Enter for 0% (working capital ignored): ",
+                                 default=0.0) / 100
+    if abs(wc_ratio) > 0.5:
+        print(f"  ⚠ {wc_ratio:.0%} is unusually large — industries like REITs and financials carry loans")
+        print("  and receivables that aren't operating working capital. Check before relying on it.")
+    # For the reinvestment rate, the average yearly revenue increase over the
+    # same five years the CapEx and D&A averages use — one year's jump
+    # (TSMC: +34%) would swing the implied growth by itself.
+    revenue_history = get_annual_series(facts, METRIC_TAGS["revenue"], years=6)
+    avg_change_in_wc = 0.0
+    if wc_ratio and len(revenue_history) >= 2 and revenue_history[-1]["val"]:
+        avg_increase = ((revenue_history[-1]["val"] - revenue_history[0]["val"])
+                        / (len(revenue_history) - 1) / revenue_history[-1]["val"])  # share of revenue, currency-free
+        avg_change_in_wc = wc_ratio * revenue * avg_increase
+        print(f"  Average yearly working-capital change (FY{revenue_history[0]['fiscal_year']}-"
+              f"FY{revenue_history[-1]['fiscal_year']} revenue growth): ${avg_change_in_wc:,.0f}")
+
     try:
-        reinvestment_rate = model.compute_reinvestment_rate(capex, d_and_a, 0, nopat)
+        reinvestment_rate = model.compute_reinvestment_rate(capex, d_and_a, avg_change_in_wc, nopat)
         roic = model.compute_roic(nopat, invested_capital)
         implied_growth = 0.0 if growth_undefined else model.implied_growth_rate(reinvestment_rate, roic)
     except (ZeroDivisionError, ValueError):
@@ -2947,8 +2990,9 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     print("  Growth check (reinvestment-rate-derived)")
     print(f"{'='*60}")
     if reinvestment_rate is not None:
-        print(f"  Reinvestment rate:  {reinvestment_rate:.2%}   (CapEx - D&A) / NOPAT"
-              + ("  [both R&D-adjusted]" if rd_result is not None else ""))
+        print(f"  Reinvestment rate:  {reinvestment_rate:.2%}   (CapEx - D&A"
+              + (" + change in working capital" if avg_change_in_wc else "") + ") / NOPAT"
+              + ("  [R&D-adjusted]" if rd_result is not None else ""))
         print(f"  ROIC:               {roic:.2%}   NOPAT / Invested Capital"
               + ("  [includes research asset]" if rd_result is not None else ""))
         if growth_undefined:
@@ -3428,7 +3472,8 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     summary.update(revenue=revenue, ebit=ebit, fcff=fcff, total_debt=total_debt, cash=cash,
                    bridge_debt=bridge_debt, bridge_cash=bridge_cash, shares=value_shares,
                    adr_ratio=adr_ratio, terminal_growth=terminal_growth,
-                   return_on_new_capital=return_on_new_capital, share_price=share_price)
+                   return_on_new_capital=return_on_new_capital, share_price=share_price,
+                   working_capital_ratio=wc_ratio)
     print(f"{'='*60}")
     print(f"  Effective tax rate:        {effective_tax_rate:.2%}")
     print(f"  Beta:                      {beta:.2f}  ({beta_source})")
@@ -3438,6 +3483,8 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     print(f"  WACC (discount rate):      {discount_rate:.2%}")
     print(f"  Market cap:                ${market_cap:,.0f}")
     print(f"  Base-year FCFF:            ${fcff:,.0f}")
+    print(f"  Working capital:           {wc_ratio:.1%} of each year's revenue increase"
+          + ("" if wc_ratio else " (ignored)"))
     print(f"  High-growth-stage rate:    {fcff_growth:.2%}  (reinvestment-rate-derived; type an override above to change)")
     print(f"  Assumed terminal growth:   {terminal_growth:.2%}  (type an override above to change)")
     print(f"  Return on new capital:     {ronic_label}  (stable-growth reinvestment = g / this)")
@@ -3464,6 +3511,8 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         shares_outstanding=value_shares,
         base_nopat=terminal_nopat_basis,
         return_on_new_capital=return_on_new_capital,
+        base_revenue=revenue,
+        working_capital_ratio=wc_ratio,
     )
 
     # ---- Qualitative adjustment: anything not captured above — moat
@@ -3507,7 +3556,8 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     print(f"\n  Sanity checks (base case)")
     base_breakdown = model.enterprise_value_multi_stage(
         fcff, fcff_growth, high_growth_years, fade_years, terminal_growth, discount_rate,
-        base_nopat=terminal_nopat_basis, return_on_new_capital=return_on_new_capital, return_breakdown=True)
+        base_nopat=terminal_nopat_basis, return_on_new_capital=return_on_new_capital, return_breakdown=True,
+        base_revenue=revenue, working_capital_ratio=wc_ratio)
     summary["sanity"] = {"tv_share_dcf": print_terminal_share(base_breakdown, high_growth_years + fade_years)}
 
     # ---- Market-implied growth rate: rather than just showing the
@@ -3522,7 +3572,8 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         implied_growth = model.solve_implied_growth_rate(
             share_price, fcff, high_growth_years, fade_years,
             discount_rate, terminal_growth, bridge_debt, bridge_cash, value_shares,
-            base_nopat=terminal_nopat_basis, return_on_new_capital=return_on_new_capital)
+            base_nopat=terminal_nopat_basis, return_on_new_capital=return_on_new_capital,
+            base_revenue=revenue, working_capital_ratio=wc_ratio)
         print(f"\n{'='*60}")
         print("  Market-implied growth rate")
         print(f"{'='*60}")
