@@ -3986,8 +3986,9 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         # not "this specific company might run out of cash before any of
         # this plays out," which is a real, separate risk for a young,
         # cash-burning company. Blend the going-concern value with a
-        # distressed liquidation value, weighted by an estimated
-        # probability of failure from current cash burn and runway. ----
+        # distressed liquidation value, weighted by a probability of
+        # failure. The default is Damodaran's first approach: the 10-year
+        # default rate for the company's bond rating. ----
         print(f"\n{'='*60}")
         print("  Failure-probability overlay")
         print(f"{'='*60}")
@@ -4006,10 +4007,28 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         runway = model.estimate_runway_years(cash, current_burn_rate)
         runway_display = f"{runway:.1f} years" if runway != float("inf") else "N/A (not burning cash)"
         print(f"  Cash: ${cash:,.0f}   Current annual burn rate: ${current_burn_rate:,.0f}   Runway: {runway_display}")
-        default_failure_prob = model.failure_probability_from_runway(runway)
-        print(f"  Runway-implied failure probability (illustrative table — there's no published")
-        print(f"  standard for this, override with sector judgment if you have it): {default_failure_prob:.0%}")
-        default_source = "runway-implied"
+        # The synthetic rating only means something on positive operating
+        # income: a money-loser always comes out D, and Damodaran's note on
+        # that is not to use it for a going concern — use a real rating.
+        rating, rating_source = None, None
+        if synthetic_rating and ebit > 0 and model.rating_bucket(synthetic_rating) not in (None, "D"):
+            rating, rating_source = synthetic_rating, "synthetic rating from interest coverage"
+        else:
+            print("  Operating income isn't positive, so the synthetic rating (D) doesn't apply to a going")
+            print("  concern. The company's actual bond rating (S&P or Moody's — in the 10-K's debt")
+            print("  discussion or on the agency's site) gives the default probability instead.")
+            while True:
+                typed = input("  Actual bond rating (e.g. BB+ or Ba1), or Enter if it has none: ").strip()
+                if not typed or model.failure_probability_from_rating(typed) is not None:
+                    break
+                print("    Couldn't read that as a going-concern rating (AAA down to C).")
+            if typed:
+                rating, rating_source = typed, "actual rating, typed"
+        default_failure_prob = model.failure_probability_from_rating(rating) if rating else None
+        if default_failure_prob is not None:
+            print(f"  10-year default probability for {rating} ({rating_source}): {default_failure_prob:.2%}")
+            print(f"  ({model.RATING_DEFAULT_SOURCE})")
+        default_source = "rating-implied"
         if lead_phase is not None:
             # For a cash-burning biotech the bigger risk is usually the lead
             # drug failing in the clinic, not the runway itself — Damodaran
@@ -4017,7 +4036,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
             # company already funding itself survives a trial failure, so
             # there it's shown for reference only.
             clinical_failure_prob = 1.0 - model.PHASE_APPROVAL_PROBABILITY[lead_phase]
-            if current_burn_rate > 0:
+            if current_burn_rate > 0 or default_failure_prob is None:
                 default_failure_prob = clinical_failure_prob
                 default_source = "lead-drug clinical"
                 print(f"  Lead drug is in {lead_phase}: clinical failure probability "
@@ -4026,10 +4045,15 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
             else:
                 print(f"  Lead drug is in {lead_phase} (clinical failure probability {clinical_failure_prob:.0%}),")
                 print("  but this company isn't burning cash, so a trial failure wouldn't end it —")
-                print("  keeping the runway-implied default.")
-        prob_input = input(f"  Probability of failure (e.g. 20 for 20%; Enter to use the {default_source} "
-                            "figure above): ").strip()
-        probability_of_failure = parse_number(prob_input) / 100 if prob_input else default_failure_prob
+                print("  keeping the rating-implied default.")
+        if default_failure_prob is not None:
+            probability_of_failure = prompt_number(
+                f"  Probability of failure (e.g. 20 for 20%; Enter to use the {default_source} figure above): ",
+                default=default_failure_prob * 100) / 100
+        else:
+            print("  No rating to base a default on. Damodaran's other published route is survival rates by")
+            print("  company age and sector (Bureau of Labor Statistics), meant for young private firms.")
+            probability_of_failure = prompt_number("  Probability of failure as a percent (e.g. 5 for 5%): ") / 100
         haircut_input = input("  Liquidation haircut on book equity (e.g. 50 for 50%; Enter for "
                                "50%): ").strip()
         liquidation_haircut = parse_number(haircut_input) / 100 if haircut_input else 0.50
