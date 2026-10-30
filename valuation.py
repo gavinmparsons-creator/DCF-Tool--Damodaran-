@@ -927,6 +927,12 @@ def trailing_twelve_months(facts_json, tag, unit, annual_end, annual_val):
     return annual_val + current["val"] - prior_ytd["val"], current["end"]
 
 
+def _period_label(start, end):
+    days = _days(start, end)
+    return (f"quarter ending {end}" if days < 120 else
+            f"year to date ending {end}" if days < 330 else f"year ending {end}")
+
+
 def latest_reported_dilution(facts_json):
     """
     The company's own reported dilution: weighted-average DILUTED shares
@@ -937,10 +943,20 @@ def latest_reported_dilution(facts_json):
     no assumed option term, volatility or averaged strike, which is why
     this is used instead of valuing options with Black-Scholes.
 
-    Returns (dilutive_shares, period_label), (0.0, label) when diluted
-    equals basic (normal in a loss period, when dilution is excluded as
-    anti-dilutive — so "none reported", not "none exists"), or (None,
-    None) when the counts aren't reported at all.
+    In a loss period diluted equals basic — every option and RSU would
+    shrink the loss per share, so all are excluded as anti-dilutive —
+    and the difference says nothing. The company then reports the count
+    it excluded (AntidilutiveSecuritiesExcludedFromComputationOfEarnings-
+    PerShareAmount; Roblox: 37.3M, about 5% of its shares), which is used
+    instead when filed for the same period. That count is gross: options
+    are counted in full whatever their strike, and convertibles as if
+    converted.
+
+    Returns (dilutive_shares, period_label, source) with source
+    "diluted-basic" or "antidilutive"; (0.0, label, "diluted-basic") when
+    diluted equals basic and no excluded count is filed for that period
+    (so "none reported", not "none exists"); (None, None, None) when the
+    counts aren't reported at all.
     """
     tags = _all_taxonomy_tags(facts_json)
     def periods(tag):
@@ -953,13 +969,21 @@ def latest_reported_dilution(facts_json):
     basic = periods("WeightedAverageNumberOfSharesOutstandingBasic")
     common = set(diluted) & set(basic)
     if not common:
-        return None, None
+        return None, None, None
     # Most recent end date; for that date, the shortest period (the quarter) is the most current.
     start, end = max(common, key=lambda p: (p[1], p[0]))
-    days = _days(start, end)
-    label = (f"quarter ending {end}" if days < 120 else
-             f"year to date ending {end}" if days < 330 else f"year ending {end}")
-    return max(0.0, diluted[(start, end)] - basic[(start, end)]), label
+    label = _period_label(start, end)
+    difference = max(0.0, diluted[(start, end)] - basic[(start, end)])
+    if difference == 0:
+        # Often filed only for the year to date (Roblox, Snowflake, Viking),
+        # not the quarter: same end date, shortest period available.
+        same_end = [(p, val) for p, val in
+                    periods("AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareAmount").items()
+                    if p[1] == end and val]
+        if same_end:
+            (p_start, _), excluded = max(same_end, key=lambda item: item[0][0])
+            return excluded, _period_label(p_start, end), "antidilutive"
+    return difference, label, "diluted-basic"
 
 
 def freshest_instant(facts_json, tag_candidates):
@@ -3344,8 +3368,11 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
                                           "LiabilityDefinedBenefitPlanNoncurrent"])
     equity_investments, _ = current_value(["EquityMethodInvestments",
                                            "InvestmentAccountedForUsingEquityMethod"])  # us-gaap, ifrs-full
-    other_dilution_shares, dilution_period = latest_reported_dilution(facts)
+    other_dilution_shares, dilution_period, dilution_source = latest_reported_dilution(facts)
     dilution_reported = other_dilution_shares is not None
+    converts_in_debt = [financials[k]["tag"] for k in ("total_debt_current", "total_debt_noncurrent")
+                        if financials.get(k, {}).get("tag") and "Convertible" in financials[k]["tag"]
+                        and financials[k].get("value")]
     other_dilution_shares = (other_dilution_shares or 0.0) / adr_ratio  # filed in ordinary shares -> ADS units
 
     def show_bridge():
@@ -3358,8 +3385,16 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         print(f"  + Equity-method investments (book):       ${equity_investments:>18,.0f}")
         print(f"  Shares: {shares_out:,.0f} basic + {other_dilution_shares:,.0f} options/RSUs/converts "
               f"= {shares_out + other_dilution_shares:,.0f}")
-        print("    (dilution = the company's reported diluted - basic shares, "
-              + (f"{dilution_period})" if dilution_reported else "not reported)"))
+        if dilution_source == "antidilutive":
+            print(f"    (diluted = basic in that loss period, {dilution_period}, so this is the count the company")
+            print("    reported EXCLUDED as anti-dilutive — gross: options in full whatever their strike)")
+            if converts_in_debt:
+                print(f"    ⚠ Debt includes convertible notes ({', '.join(converts_in_debt)}). If the filing's")
+                print("    anti-dilutive table counts their conversion shares, subtract those (type e) — they're")
+                print("    already valued as debt, so counting them as shares too would charge for them twice.")
+        else:
+            print("    (dilution = the company's reported diluted - basic shares, "
+                  + (f"{dilution_period})" if dilution_reported else "not reported)"))
 
     print(f"\n{'='*60}")
     print("  Equity bridge (operating value -> value per share)")

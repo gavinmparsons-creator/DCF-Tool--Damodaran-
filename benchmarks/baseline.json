@@ -201,9 +201,9 @@
     "company": "Snowflake Inc.",
     "cost_of_equity": 0.10322770146936057,
     "dcf": {
-      "base": -13.372022320745492,
-      "high": -14.191698354940574,
-      "low": -12.67475991243967
+      "base": -11.712429491196428,
+      "high": -12.430376075927988,
+      "low": -11.10170385835973
     },
     "ebit": -262918493.0,
     "erp": 0.042,
@@ -215,7 +215,7 @@
       "tv_share_dcf": null
     },
     "share_price": 330.27,
-    "shares": 352800000.0,
+    "shares": 402790000.0,
     "terminal_growth": 0.025,
     "ticker": "SNOW",
     "total_debt": 2745272000.0,
@@ -259,14 +259,14 @@
     "company": "Viking Therapeutics, Inc.",
     "cost_of_equity": 0.09520010595447417,
     "dcf": {
-      "base": -21.328772357807093,
-      "high": -24.44217249893376,
-      "low": -18.794370176577743
+      "base": -19.403871642747806,
+      "high": -22.23629048512069,
+      "low": -17.098196764199358
     },
     "ebit": -339557063.5,
     "erp": 0.042,
     "fcff": -577011430.265,
-    "pipeline_per_share": 23.81127630918374,
+    "pipeline_per_share": 21.662332055613277,
     "return_on_new_capital": null,
     "revenue": 0,
     "risk_free_rate": 0.049800000000000004,
@@ -274,7 +274,7 @@
       "tv_share_dcf": null
     },
     "share_price": 26.86,
-    "shares": 127522189.0,
+    "shares": 140172631.0,
     "terminal_growth": 0.025,
     "ticker": "VKTX",
     "total_debt": 4038000,
