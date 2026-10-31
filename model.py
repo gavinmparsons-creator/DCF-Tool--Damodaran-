@@ -757,7 +757,7 @@ def project_revenue_path(current_revenue, initial_growth_rate, terminal_growth_r
     return revenues
 
 
-def project_margin_path(current_margin, target_margin, years=10):
+def project_margin_path(current_margin, target_margin, years=10, convergence_years=None):
     """
     Operating margin converges LINEARLY from current_margin (today's —
     possibly negative, possibly cyclically depressed or elevated) to
@@ -766,10 +766,17 @@ def project_margin_path(current_margin, target_margin, years=10):
     input in the whole narrative DCF — it's worth more scrutiny than any
     other assumption here. Returns a list of margins (decimals, e.g.
     0.20 for 20%), oldest (year 1) first, length `years`.
+
+    convergence_years (Ginzu's "year of convergence") reaches the target
+    by that year instead and holds it flat after — e.g. 2 for cost cuts
+    that land fast. None (default) converges by the final year.
     """
     if years < 1:
         raise ValueError("years must be at least 1")
-    return [current_margin + (target_margin - current_margin) * (t / years) for t in range(1, years + 1)]
+    n = years if convergence_years is None else convergence_years
+    if not 1 <= n <= years:
+        raise ValueError("convergence_years must be between 1 and years")
+    return [current_margin + (target_margin - current_margin) * (min(t, n) / n) for t in range(1, years + 1)]
 
 
 def project_wacc_path(initial_wacc, mature_wacc, years=10):
@@ -916,7 +923,8 @@ def nol_tax_rate_path(ebit_path, nol_balance, marginal_tax_rate):
 
 
 def project_narrative_path(current_revenue, initial_growth_rate, current_margin, target_margin,
-                            tax_rate, sales_to_capital_ratio, terminal_growth_rate, years=10):
+                            tax_rate, sales_to_capital_ratio, terminal_growth_rate, years=10,
+                            margin_convergence_years=None):
     """
     Convenience wrapper that builds and returns every year-by-year path
     at once (revenue, margin, EBIT, reinvestment, FCFF) — for a caller
@@ -927,7 +935,7 @@ def project_narrative_path(current_revenue, initial_growth_rate, current_margin,
     discount it).
     """
     revenue_path = project_revenue_path(current_revenue, initial_growth_rate, terminal_growth_rate, years)
-    margin_path = project_margin_path(current_margin, target_margin, years)
+    margin_path = project_margin_path(current_margin, target_margin, years, margin_convergence_years)
     ebit_path = project_ebit_path(revenue_path, margin_path)
     reinvestment_path = reinvestment_from_sales_to_capital(revenue_path, sales_to_capital_ratio, current_revenue)
     fcff_path = project_fcff_narrative(revenue_path, margin_path, tax_rate, sales_to_capital_ratio, current_revenue)
@@ -942,7 +950,8 @@ def project_narrative_path(current_revenue, initial_growth_rate, current_margin,
 
 def enterprise_value_narrative(current_revenue, initial_growth_rate, current_margin, target_margin,
                                 tax_rate, sales_to_capital_ratio, discount_rate, terminal_growth_rate,
-                                years=10, return_on_new_capital=None, return_breakdown=False):
+                                years=10, return_on_new_capital=None, return_breakdown=False,
+                                margin_convergence_years=None):
     """
     Full narrative DCF (Damodaran's "Ginzu"-style build): rebuilds the
     revenue and margin paths fresh off the terminal_growth_rate passed
@@ -979,7 +988,7 @@ def enterprise_value_narrative(current_revenue, initial_growth_rate, current_mar
     with return_breakdown=True {"ev", "pv_explicit", "pv_terminal"}.
     """
     revenue_path = project_revenue_path(current_revenue, initial_growth_rate, terminal_growth_rate, years)
-    margin_path = project_margin_path(current_margin, target_margin, years)
+    margin_path = project_margin_path(current_margin, target_margin, years, margin_convergence_years)
     fcff_path = project_fcff_narrative(revenue_path, margin_path, tax_rate, sales_to_capital_ratio, current_revenue)
     final_tax = tax_rate[-1] if isinstance(tax_rate, list) else tax_rate
     final_nopat = revenue_path[-1] * margin_path[-1] * (1 - final_tax)
@@ -1039,7 +1048,7 @@ def run_valuation_range_narrative(current_revenue, initial_growth_rate, current_
                                    tax_rate, sales_to_capital_ratio, discount_rate, terminal_growth_rate,
                                    total_debt, cash, shares_outstanding,
                                    years=10, wacc_spread=0.01, growth_spread=0.005,
-                                   return_on_new_capital=None):
+                                   return_on_new_capital=None, margin_convergence_years=None):
     """
     Same low/base/high sensitivity range as run_valuation_range_multi_stage,
     off the narrative (revenue x margin x reinvestment) build instead of
@@ -1098,7 +1107,8 @@ def run_valuation_range_narrative(current_revenue, initial_growth_rate, current_
             display_rate = dr
         ev = enterprise_value_narrative(current_revenue, initial_growth_rate, current_margin, target_margin,
                                          tax_rate, sales_to_capital_ratio, dr, tgr, years,
-                                         return_on_new_capital)
+                                         return_on_new_capital,
+                                         margin_convergence_years=margin_convergence_years)
         per_share, equity_val = equity_value_per_share(ev, total_debt, cash, shares_outstanding)
         results[label] = {
             "discount_rate": display_rate,
@@ -1823,6 +1833,13 @@ if __name__ == "__main__":
     for computed, expected in zip(margin_path, expected_margins):
         assert abs(computed - expected) < 1e-9, "Margin path mismatch!"
     assert abs(margin_path[-1] - 0.20) < 1e-9, "Margin path must hit target_margin exactly in the final year!"
+
+    # Year of convergence 2 (of 4): -10 + 30*(1/2) = 5%, then 20% held flat.
+    fast_margins = project_margin_path(-0.10, 0.20, years=4, convergence_years=2)
+    print(f"Margin path, converging by year 2: {[f'{v:.4f}' for v in fast_margins]}  "
+          f"(expected ['0.0500', '0.2000', '0.2000', '0.2000'])")
+    for computed, expected in zip(fast_margins, [0.05, 0.20, 0.20, 0.20]):
+        assert abs(computed - expected) < 1e-9, "Margin convergence-year path mismatch!"
 
     # EBIT path = revenue x margin, element-wise.
     ebit_path = project_ebit_path(rev_path, margin_path)
