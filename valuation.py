@@ -3836,6 +3836,13 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
                                   "margin flat): ").strip()
             default_target = current_margin
         target_margin = parse_number(margin_input) / 100 if margin_input else default_target
+        narrative_years = 10
+        convergence_input = input(f"  Year the margin reaches that target, then holds (Ginzu's year of "
+                                  f"convergence;\n  e.g. 2 for fast cost cuts; Enter for year {narrative_years}): ").strip()
+        margin_convergence_years = int(parse_number(convergence_input)) if convergence_input else None
+        if margin_convergence_years is not None and not 1 <= margin_convergence_years <= narrative_years:
+            print(f"  Must be 1-{narrative_years} — using year {narrative_years}.")
+            margin_convergence_years = None
         trailing_s2c = revenue / invested_capital if invested_capital else None
         print("  Sales-to-capital ratio: how much new revenue $1 of new capital buys (2.0 ="
               " $1 buys $2 of revenue).")
@@ -3906,7 +3913,6 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
                                     f"{default_initial_wacc:.1%}): ").strip()
         initial_wacc = parse_number(initial_wacc_input) / 100 if initial_wacc_input else default_initial_wacc
 
-        narrative_years = 10
         wacc_path = model.project_wacc_path(initial_wacc, discount_rate, narrative_years)
 
         # The NOL ramp needs the EBIT path up front (to know how much
@@ -3918,13 +3924,15 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         # known, minor simplification rather than re-deriving the NOL
         # ramp three times.
         base_revenue_path = model.project_revenue_path(revenue, initial_growth, terminal_growth, narrative_years)
-        base_margin_path = model.project_margin_path(current_margin, target_margin, narrative_years)
+        base_margin_path = model.project_margin_path(current_margin, target_margin, narrative_years,
+                                                    margin_convergence_years)
         base_ebit_path = model.project_ebit_path(base_revenue_path, base_margin_path)
         tax_rate_path = model.nol_tax_rate_path(base_ebit_path, nol_balance, marginal_tax_rate)
 
         narrative_path = model.project_narrative_path(
             revenue, initial_growth, current_margin, target_margin,
-            tax_rate_path, sales_to_capital, terminal_growth, years=narrative_years)
+            tax_rate_path, sales_to_capital, terminal_growth, years=narrative_years,
+            margin_convergence_years=margin_convergence_years)
         print(f"\n  {'Yr':>3} {'Revenue':>16} {'Margin':>8} {'EBIT':>16} {'Tax%':>7} {'WACC':>7} "
               f"{'Reinvest':>16} {'FCFF':>16}")
         for t in range(narrative_years):
@@ -3936,7 +3944,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
             revenue, initial_growth, current_margin, target_margin,
             tax_rate_path, sales_to_capital, (initial_wacc, discount_rate), terminal_growth,
             bridge_debt, bridge_cash, value_shares, years=narrative_years,
-            return_on_new_capital=return_on_new_capital)
+            return_on_new_capital=return_on_new_capital, margin_convergence_years=margin_convergence_years)
         print()
         for label in ("low", "base", "high"):
             r = narrative_range[label]
@@ -3951,7 +3959,8 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         print(f"\n  Sanity checks (base case)")
         narrative_breakdown = model.enterprise_value_narrative(
             revenue, initial_growth, current_margin, target_margin, tax_rate_path, sales_to_capital,
-            wacc_path, terminal_growth, narrative_years, return_on_new_capital, return_breakdown=True)
+            wacc_path, terminal_growth, narrative_years, return_on_new_capital, return_breakdown=True,
+            margin_convergence_years=margin_convergence_years)
         sanity = summary.setdefault("sanity", {})
         sanity["tv_share_narrative"] = print_terminal_share(narrative_breakdown, narrative_years)
         year10_revenue = narrative_path["revenue"][-1]
