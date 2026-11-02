@@ -55,6 +55,7 @@ import html
 import json
 import time
 import argparse
+import math
 import http.cookiejar
 from datetime import datetime, timezone
 from urllib.request import Request, urlopen, build_opener, HTTPCookieProcessor
@@ -2895,6 +2896,23 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         cash += sti_val
     adr_ratio, market_shares, adr_counts_disagree = resolve_adr_ratio(
         ticker, cik, financials["shares_outstanding"]["value"])
+    filed_count = financials["shares_outstanding"]["value"]
+    share_scale = 1.0  # power of ten the filing's share counts are off by (applied to dilution too)
+    if adr_ratio == 1.0 and filed_count:
+        # Scale check for domestic filers: Tempus AI tags its share counts
+        # in thousands (174,264 for 174.3M) and has no cover-page count, so
+        # market cap came out 1,000x too small. Only an order-of-magnitude
+        # gap counts — a dual-class company's filed count can legitimately
+        # differ from the market's by a share class.
+        domestic_market = get_market_shares(ticker)
+        if domestic_market and not 0.01 <= filed_count / domestic_market <= 100:
+            print(f"\n  ⚠ Filed share count {filed_count:,.0f} (tag: {financials['shares_outstanding']['tag']}) is "
+                  f"{domestic_market / filed_count:,.0f}x off the market's {domestic_market:,.0f} —")
+            print("  most likely tagged in thousands or millions in the filing.")
+            shares_out = prompt_number("  Press Enter to use the market's count, or type the share count: ",
+                                       default=domestic_market)
+            financials["shares_outstanding"]["value"] = shares_out
+            share_scale = 10.0 ** round(math.log10(shares_out / filed_count))
     if adr_counts_disagree and market_shares:
         filed_count = financials["shares_outstanding"]["value"]
         print(f"  Filed ordinary shares: {filed_count:,.0f}   Market ADS count x ratio: "
@@ -3726,7 +3744,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     converts_in_debt = [financials[k]["tag"] for k in ("total_debt_current", "total_debt_noncurrent")
                         if financials.get(k, {}).get("tag") and "Convertible" in financials[k]["tag"]
                         and financials[k].get("value")]
-    other_dilution_shares = (other_dilution_shares or 0.0) / adr_ratio  # filed in ordinary shares -> ADS units
+    other_dilution_shares = (other_dilution_shares or 0.0) * share_scale / adr_ratio  # filed in ordinary shares -> ADS units
 
     def show_bridge():
         print(f"  - Debt (incl. operating leases):          ${total_debt:>18,.0f}")
