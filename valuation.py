@@ -3063,6 +3063,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     beta_source = "regression beta (as pulled)"
     industry_beta = None
     mix = None  # the chosen industry mix, reused by the sanity checks
+    beta_mix = None  # --financial: the mix behind the beta and the industry ROE
     if damodaran["betas"]:
         industries = damodaran["betas"]["industries"]
         if fx_currency:
@@ -3078,13 +3079,13 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
             # small, thinly traded banks, whose measured betas are dragged
             # down by stale prices. A large bank trades every second, so it
             # takes the money-center beta instead (same $5B line as the
-            # large-firm rating table). Industry ROE still uses the mix.
+            # large-firm rating table), and its industry ROE to match.
             beta_mix = mix
             if (market_cap > LARGE_FIRM_MARKET_CAP and [name for name, _ in mix] == ["Banks (Regional)"]
                     and "Bank (Money Center)" in industries):
                 beta_mix = [("Bank (Money Center)", 1.0)]
                 print(f"  Large bank (market cap ${market_cap / 1e9:,.0f}B > ${LARGE_FIRM_MARKET_CAP / 1e9:,.0f}B): "
-                      f"using the money-center beta, not the regional one\n"
+                      f"using the money-center beta and ROE, not the regional ones\n"
                       f"  ({industries['Banks (Regional)']['beta']:.2f}, {industries['Banks (Regional)']['firms']} "
                       "mostly small, thinly traded banks).")
             unlevered = model.weighted_unlevered_beta(
@@ -3224,7 +3225,8 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
 
     if financial:
         run_financial_firm_valuation(summary, facts, fx_currency, fx_rate, book_equity, shares_out,
-                                     share_price, coe, damodaran, mix, risk_free_rate, beta_source, erp_source)
+                                     share_price, coe, damodaran, beta_mix or mix, risk_free_rate,
+                                     beta_source, erp_source)
         return summary
 
     # ---- Reinvestment-rate-derived growth (Damodaran fundamental growth) ----
