@@ -100,6 +100,10 @@ DEFAULT_TERMINAL_GROWTH = 0.025  # roughly long-run GDP growth
 # Damodaran's line between his large- and small-firm rating tables; also
 # where --financial switches a bank to the money-center beta.
 LARGE_FIRM_MARKET_CAP = 5_000_000_000
+# --financial: above this a bank also takes the money-center industry ROE
+# as its stable-ROE default. A judgment line (not Damodaran's): the money-
+# center average is ~15 giant banks, which mid-size banks don't earn like.
+MONEY_CENTER_ROE_MARKET_CAP = 100_000_000_000
 DEFAULT_FCFF_GROWTH = 0.05       # near-term growth rate for projected FCFF
 DEFAULT_COST_OF_DEBT = 0.05      # fallback only — used when interest expense isn't found at all; normally replaced by the synthetic-rating cost of debt (see run_full_valuation)
 
@@ -3063,7 +3067,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     beta_source = "regression beta (as pulled)"
     industry_beta = None
     mix = None  # the chosen industry mix, reused by the sanity checks
-    beta_mix = None  # --financial: the mix behind the beta and the industry ROE
+    beta_mix = roe_mix = None  # --financial: the mixes behind the beta and the industry ROE
     if damodaran["betas"]:
         industries = damodaran["betas"]["industries"]
         if fx_currency:
@@ -3079,15 +3083,21 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
             # small, thinly traded banks, whose measured betas are dragged
             # down by stale prices. A large bank trades every second, so it
             # takes the money-center beta instead (same $5B line as the
-            # large-firm rating table), and its industry ROE to match.
-            beta_mix = mix
+            # large-firm rating table). Its industry ROE switches only above
+            # MONEY_CENTER_ROE_MARKET_CAP: liquidity is about size, returns
+            # about the business.
+            beta_mix = roe_mix = mix
             if (market_cap > LARGE_FIRM_MARKET_CAP and [name for name, _ in mix] == ["Banks (Regional)"]
                     and "Bank (Money Center)" in industries):
                 beta_mix = [("Bank (Money Center)", 1.0)]
+                if market_cap > MONEY_CENTER_ROE_MARKET_CAP:
+                    roe_mix = beta_mix
                 print(f"  Large bank (market cap ${market_cap / 1e9:,.0f}B > ${LARGE_FIRM_MARKET_CAP / 1e9:,.0f}B): "
-                      f"using the money-center beta and ROE, not the regional ones\n"
+                      f"using the money-center beta, not the regional one\n"
                       f"  ({industries['Banks (Regional)']['beta']:.2f}, {industries['Banks (Regional)']['firms']} "
-                      "mostly small, thinly traded banks).")
+                      "mostly small, thinly traded banks)"
+                      + (f"; over ${MONEY_CENTER_ROE_MARKET_CAP / 1e9:,.0f}B, its industry ROE too." if roe_mix is beta_mix
+                         else f". Industry ROE stays regional (under ${MONEY_CENTER_ROE_MARKET_CAP / 1e9:,.0f}B)."))
             unlevered = model.weighted_unlevered_beta(
                 [(industries[name]["beta"], weight) for name, weight in beta_mix])
             industry_beta = unlevered
@@ -3225,7 +3235,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
 
     if financial:
         run_financial_firm_valuation(summary, facts, fx_currency, fx_rate, book_equity, shares_out,
-                                     share_price, coe, damodaran, beta_mix or mix, risk_free_rate,
+                                     share_price, coe, damodaran, roe_mix or mix, risk_free_rate,
                                      beta_source, erp_source)
         return summary
 
