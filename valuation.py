@@ -97,6 +97,9 @@ DEFAULT_RISK_FREE_RATE = 0.045   # fallback only — normally today's 10-year Tr
 DEFAULT_EQUITY_RISK_PREMIUM = 0.055  # fallback only — normally Damodaran's current implied ERP (see load_damodaran_data)
 DEFAULT_MARGINAL_TAX_RATE = 0.25    # US federal + state statutory, for relevering betas (Damodaran relevers at the marginal rate)
 DEFAULT_TERMINAL_GROWTH = 0.025  # roughly long-run GDP growth
+# Damodaran's line between his large- and small-firm rating tables; also
+# where --financial switches a bank to the money-center beta.
+LARGE_FIRM_MARKET_CAP = 5_000_000_000
 DEFAULT_FCFF_GROWTH = 0.05       # near-term growth rate for projected FCFF
 DEFAULT_COST_OF_DEBT = 0.05      # fallback only — used when interest expense isn't found at all; normally replaced by the synthetic-rating cost of debt (see run_full_valuation)
 
@@ -2664,7 +2667,16 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         print("  unofficial/rate-limited, this is expected to fail sometimes).")
 
     # ---- Assemble DCF inputs ----
-    revenue = get_metric_value(financials, "revenue", "revenue", stale)
+    def operating_metric(key, label, **kwargs):
+        """get_metric_value, except under --financial: the equity model
+        doesn't use firm-level inputs, so a missing or stale one isn't
+        asked for (Synchrony has no revenue tag — that would block the run)."""
+        if financial:
+            value = financials[key]["value"] or 0.0
+            return (value, False) if kwargs.get("return_override_flag") else value
+        return get_metric_value(financials, key, label, stale, **kwargs)
+
+    revenue = operating_metric("revenue", "revenue")
     rebuilt = pretax_plus_interest_series(facts, years=1)
     if financials["operating_income"]["value"] is None and rebuilt:
         latest_rebuilt = rebuilt[-1]
@@ -2697,7 +2709,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
             ebit = prompt_number("  Press Enter to use it, or type a corrected EBIT (in dollars): ",
                                  default=latest_rebuilt["val"])
     else:
-        ebit = get_metric_value(financials, "operating_income", "EBIT / operating income", stale)
+        ebit = operating_metric("operating_income", "EBIT / operating income")
 
     # ---- R&D capitalization (Damodaran-style) ----
     # Accounting expenses R&D as incurred, but for an R&D-driven business
@@ -2811,19 +2823,18 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
                 else:
                     cycle_choice = None
 
-    pretax_income = get_metric_value(financials, "pretax_income", "pretax income", stale)
-    tax_expense = get_metric_value(financials, "income_tax_expense", "income tax expense", stale)
+    pretax_income = operating_metric("pretax_income", "pretax income")
+    tax_expense = operating_metric("income_tax_expense", "income tax expense")
 
     # CapEx and D&A are naturally lumpy (a big equipment buy, an
     # acquisition-driven step-up in amortization) — a single year can swing
     # the reinvestment rate and FCFF hard in either direction. Damodaran
     # normalizes both over a multi-year window before using them, so we
     # use a trailing 5-year average here instead of the latest year alone.
-    latest_d_and_a, d_and_a_overridden = get_metric_value(
-        financials, "depreciation_amortization", "depreciation & amortization", stale,
-        return_override_flag=True, default=0.0)
-    latest_capex, capex_overridden = get_metric_value(
-        financials, "capex", "capital expenditures", stale, return_override_flag=True, default=0.0)
+    latest_d_and_a, d_and_a_overridden = operating_metric(
+        "depreciation_amortization", "depreciation & amortization", return_override_flag=True, default=0.0)
+    latest_capex, capex_overridden = operating_metric(
+        "capex", "capital expenditures", return_override_flag=True, default=0.0)
     da_avg, _da_unit, da_years, da_n = trailing_average(facts, METRIC_TAGS["depreciation_amortization"])
     capex_avg, _capex_unit, capex_years, capex_n = trailing_average(facts, METRIC_TAGS["capex"])
     # Convert only the series that's actually denominated in fx_currency —
@@ -2865,8 +2876,11 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         print(f"  Folding in R&D: D&A +${rd_result['amortization']:,.0f} (R&D amortization), "
               f"CapEx +${rd_result['current_rd']:,.0f} (current R&D as investment).")
 
-    total_debt = resolve_total_debt(financials, facts, stale, fx_currency, fx_rate)
-    cash = get_metric_value(financials, "cash", "cash and equivalents", stale)
+    if financial:  # only shown as D/E beside the beta; deposits make it meaningless anyway
+        total_debt = sum(financials[k]["value"] or 0.0 for k in ("total_debt_current", "total_debt_noncurrent"))
+    else:
+        total_debt = resolve_total_debt(financials, facts, stale, fx_currency, fx_rate)
+    cash = operating_metric("cash", "cash and equivalents")
     sti_val, sti_tag, sti_fy, sti_unit = freshest_instant(facts, SHORT_TERM_INVESTMENT_TAGS)
     cash_fy = financials["cash"]["fiscal_year"]
     if sti_val and cash_fy is not None and sti_fy >= cash_fy:
@@ -3060,14 +3074,28 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
             # Damodaran uses a bank's or broker's industry beta as is: its
             # D/E is mostly deposits, so unlevering and relevering it means
             # nothing (and regulation keeps leverage similar across firms).
-            unlevered = model.weighted_unlevered_beta([(industries[name]["beta"], weight) for name, weight in mix])
+            # Damodaran's regional-bank beta (0.40) averages hundreds of
+            # small, thinly traded banks, whose measured betas are dragged
+            # down by stale prices. A large bank trades every second, so it
+            # takes the money-center beta instead (same $5B line as the
+            # large-firm rating table). Industry ROE still uses the mix.
+            beta_mix = mix
+            if (market_cap > LARGE_FIRM_MARKET_CAP and [name for name, _ in mix] == ["Banks (Regional)"]
+                    and "Bank (Money Center)" in industries):
+                beta_mix = [("Bank (Money Center)", 1.0)]
+                print(f"  Large bank (market cap ${market_cap / 1e9:,.0f}B > ${LARGE_FIRM_MARKET_CAP / 1e9:,.0f}B): "
+                      f"using the money-center beta, not the regional one\n"
+                      f"  ({industries['Banks (Regional)']['beta']:.2f}, {industries['Banks (Regional)']['firms']} "
+                      "mostly small, thinly traded banks).")
+            unlevered = model.weighted_unlevered_beta(
+                [(industries[name]["beta"], weight) for name, weight in beta_mix])
             industry_beta = unlevered
-            for name, weight in mix:
+            for name, weight in beta_mix:
                 print(f"    {name:<42} beta {industries[name]['beta']:.2f}  ({industries[name]['firms']} firms)"
-                      + (f"  x {weight:.0%}" if len(mix) > 1 else ""))
+                      + (f"  x {weight:.0%}" if len(beta_mix) > 1 else ""))
             print(f"  Industry beta: {industry_beta:.2f}  (levered, used as is — no relevering for a financial firm)")
             print(f"  (Damodaran's US industry betas, updated {damodaran['betas']['updated']})")
-            industry_label = " + ".join(name for name, _ in mix)
+            industry_label = " + ".join(name for name, _ in beta_mix)
         elif mix:
             unlevered = model.weighted_unlevered_beta(
                 [(industries[name]["unlevered_beta_cash"], weight) for name, weight in mix])
@@ -3310,7 +3338,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
             latest_interest_expense = None
     if latest_interest_expense is not None and _ie_unit == fx_currency:
         latest_interest_expense *= fx_rate
-    is_large_firm = market_cap > 5_000_000_000
+    is_large_firm = market_cap > LARGE_FIRM_MARKET_CAP
     synthetic_cod, interest_coverage, synthetic_rating, default_spread = None, None, None, None
     if lease_interest:
         # Leases are debt now, so their interest counts toward coverage.
@@ -3675,7 +3703,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         return val, tag
 
     minority_interest, _ = current_value(["MinorityInterest", "NoncontrollingInterests"])  # us-gaap, ifrs-full
-    bridge_preferred, _ = current_value(["PreferredStockValue"])
+    bridge_preferred, _ = current_value(PREFERRED_EQUITY_TAGS)
     pension_liability, _ = current_value(["DefinedBenefitPensionPlanLiabilitiesNoncurrent",
                                           "PensionAndOtherPostretirementDefinedBenefitPlansLiabilitiesNoncurrent",
                                           "LiabilityDefinedBenefitPlanNoncurrent"])
