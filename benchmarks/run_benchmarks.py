@@ -163,7 +163,7 @@ def run_case(case, refresh, refresh_only=()):
             summary = valuation.run_full_valuation(
                 ticker, flags.get("stage"), narrative=flags.get("narrative", False),
                 biotech=flags.get("biotech", False), reit=flags.get("reit", False),
-                cyclical=flags.get("cyclical", False))
+                cyclical=flags.get("cyclical", False), financial=flags.get("financial", False))
     finally:
         os.makedirs(LOG_DIR, exist_ok=True)
         with open(os.path.join(LOG_DIR, f"{ticker}.log"), "w") as f:
@@ -248,7 +248,7 @@ def main():
         try:
             summary = run_case(case, args.refresh, tuple(args.refresh_only))
             results[ticker] = summary
-            base = summary.get("dcf", {}).get("base")
+            base = summary.get("dcf", summary.get("excess_return", {})).get("base")
             print("ok" + (f"  (DCF base ${base:,.2f})" if base is not None else ""))
         except (BenchmarkError, Exception) as e:  # one company failing shouldn't stop the rest
             results[ticker] = {"error": f"{type(e).__name__}: {e}"}

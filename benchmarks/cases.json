@@ -16,6 +16,8 @@
      "flags": {}, "answers": [["type the marginal tax rate", "25"]]},
     {"ticker": "TSM", "why": "20-F ADR (5 per ADS), TWD reporting, no EDGAR domicile (Taiwan typed)",
      "flags": {}, "answers": [["type a country name", "Taiwan"]]},
-    {"ticker": "SNOW", "why": "never GAAP-profitable: cycle normalization must decline", "flags": {}, "answers": []}
+    {"ticker": "SNOW", "why": "never GAAP-profitable: cycle normalization must decline", "flags": {}, "answers": []},
+    {"ticker": "SCHW", "why": "brokerage/bank: excess return model (--financial), preferred stock out of book equity, levered industry beta",
+     "flags": {"financial": true}, "answers": []}
   ]
 }

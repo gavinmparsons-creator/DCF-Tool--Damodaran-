@@ -1569,6 +1569,7 @@ DAMODARAN_RATINGS_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/dat
 DAMODARAN_MARGIN_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/margin.html"
 DAMODARAN_WC_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/wcdata.html"
 DAMODARAN_ROIC_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/roc.html"
+DAMODARAN_ROE_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/roe.html"
 COUNTRY_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "country_map.json")
 EDGAR_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -1741,6 +1742,12 @@ def parse_damodaran_roic(page):
     return _parse_industry_column(page, "Lease & R&D adjusted after-tax ROIC")
 
 
+def parse_damodaran_roe(page):
+    """Industry return on equity (net income / book equity), unadjusted —
+    the stable-ROE anchor for banks and brokerages (--financial)."""
+    return _parse_industry_column(page, "ROE (unadjusted)")
+
+
 def parse_damodaran_working_capital(page):
     """Industry non-cash working capital as a share of revenue
     (receivables + inventory - payables, cash and debt excluded)."""
@@ -1777,7 +1784,8 @@ def load_damodaran_data():
                                ("ratings", DAMODARAN_RATINGS_URL, parse_damodaran_spreads),
                                ("margins", DAMODARAN_MARGIN_URL, parse_damodaran_margins),
                                ("roic", DAMODARAN_ROIC_URL, parse_damodaran_roic),
-                               ("wc", DAMODARAN_WC_URL, parse_damodaran_working_capital)):
+                               ("wc", DAMODARAN_WC_URL, parse_damodaran_working_capital),
+                               ("roe", DAMODARAN_ROE_URL, parse_damodaran_roe)):
         if is_fresh(piece):
             continue
         page = fetch_text_or_none(url)
@@ -1796,7 +1804,7 @@ def load_damodaran_data():
         except OSError:
             pass  # caching is a convenience; the run continues without it
     return {piece: cache[piece]["data"] if piece in cache else None
-            for piece in ("betas", "erp", "countries", "ratings", "margins", "roic", "wc")}
+            for piece in ("betas", "erp", "countries", "ratings", "margins", "roic", "wc", "roe")}
 
 
 # The US Treasury's daily par yield curve, one CSV per calendar year,
@@ -2417,8 +2425,177 @@ def print_terminal_share(breakdown, years):
     return share
 
 
+# --financial: what the excess return model reads. Net income to COMMON
+# (after preferred dividends), common equity (total less preferred), and
+# cash returned to common holders (dividends + buybacks).
+COMMON_NET_INCOME_TAGS = ["NetIncomeLossAvailableToCommonStockholdersBasic"]
+PREFERRED_EQUITY_TAGS = ["PreferredStockValue", "PreferredStockValueOutstanding"]
+PREFERRED_DIVIDEND_TAGS = ["DividendsPreferredStockCash", "DividendsPreferredStock",
+                           "PreferredStockDividendsIncomeStatementImpact"]
+COMMON_DIVIDEND_TAGS = ["PaymentsOfDividendsCommonStock", "DividendsCommonStockCash", "DividendsCommonStock"]
+BUYBACK_TAGS = ["PaymentsForRepurchaseOfCommonStock"]
+
+
+def run_financial_firm_valuation(summary, facts, fx_currency, fx_rate, book_equity, shares_out,
+                                 share_price, coe, damodaran, mix, risk_free_rate, beta_source, erp_source):
+    """
+    --financial: Damodaran's excess return model for a bank or brokerage,
+    in place of the FCFF DCF (see model.excess_return_equity_value for why
+    the firm-level model breaks for these). Reads ROE and payout history
+    from the 10-Ks, anchors stable ROE on Damodaran's industry ROE, prints
+    the build and a low/base/high range, and records them in `summary`.
+    """
+    def by_year(tags, years=7):
+        return {e["fiscal_year"]: e["val"] * (fx_rate if fx_currency and e["unit"] == fx_currency else 1)
+                for e in get_annual_series(facts, tags, years)}
+
+    print(f"\n{'='*60}")
+    print("  Excess return model (financial service firm, Damodaran)")
+    print(f"{'='*60}")
+    print("  A bank's or broker's debt is raw material, not financing, so it's valued at the")
+    print("  equity level: book equity + PV of (ROE - cost of equity) x book equity.")
+
+    equity_hist = by_year(["StockholdersEquity"])
+    preferred_hist = by_year(PREFERRED_EQUITY_TAGS)
+    ni_common = by_year(COMMON_NET_INCOME_TAGS)
+    ni_total, pref_divs = by_year(["NetIncomeLoss"]), by_year(PREFERRED_DIVIDEND_TAGS)
+    for fy, ni in ni_total.items():
+        if fy not in ni_common:
+            ni_common[fy] = ni - pref_divs.get(fy, 0.0)
+    dividends, buybacks = by_year(COMMON_DIVIDEND_TAGS), by_year(BUYBACK_TAGS)
+    common_equity = {fy: eq - preferred_hist.get(fy, 0.0) for fy, eq in equity_hist.items()}
+
+    rows = []
+    for fy in sorted(ni_common):
+        if fy - 1 in common_equity and common_equity[fy - 1] > 0:
+            returned = dividends.get(fy, 0.0) + buybacks.get(fy, 0.0)
+            rows.append((fy, ni_common[fy], common_equity[fy - 1], returned))
+    rows = rows[-5:]
+    if not rows:
+        print("  ⚠ Not enough net income / equity history on EDGAR for ROE — type the inputs below.")
+    else:
+        print(f"\n  {'FY':<7}{'NI to common':>16}{'Begin common eq.':>19}{'ROE':>8}"
+              f"{'Div + buybacks':>17}{'Payout':>9}")
+        for fy, ni, eq, returned in rows:
+            print(f"  FY{fy:<5}{ni:>16,.0f}{eq:>19,.0f}{ni / eq:>8.1%}{returned:>17,.0f}"
+                  + (f"{returned / ni:>9.0%}" if ni > 0 else f"{'n/a':>9}"))
+        print("  (ROE = net income to common / common equity at the start of the year;")
+        print("  payout = dividends + buybacks to common, since buybacks shrink book equity too.)")
+
+    pref_now, _pref_tag, pref_fy, pref_unit = freshest_instant(facts, PREFERRED_EQUITY_TAGS)
+    latest_equity_fy = max(equity_hist) if equity_hist else None
+    if pref_now is None or (latest_equity_fy and pref_fy is not None and pref_fy < latest_equity_fy):
+        pref_now = 0.0  # none outstanding, or a stale tag for preferred since redeemed
+    elif fx_currency and pref_unit == fx_currency:
+        pref_now *= fx_rate
+    common_bv = book_equity - pref_now
+    print(f"\n  Common book equity: ${book_equity:,.0f} total - ${pref_now:,.0f} preferred = ${common_bv:,.0f}")
+
+    latest_roe = rows[-1][1] / rows[-1][2] if rows else None
+    avg_roe = sum(ni / eq for _, ni, eq, _ in rows) / len(rows) if rows else None
+    if rows:
+        print(f"  ROE: latest FY{rows[-1][0]} {latest_roe:.1%}, {len(rows)}-yr average {avg_roe:.1%}")
+    current_roe = prompt_number(
+        "  Current ROE as a percent " + (f"(Enter for the latest, {latest_roe:.1%}): " if rows else ": "),
+        default=latest_roe * 100 if rows else None) / 100
+
+    recent = rows[-3:]
+    ni_sum = sum(ni for _, ni, _, _ in recent)
+    default_payout = (sum(r for _, _, _, r in recent) / ni_sum) if recent and ni_sum > 0 else None
+    if default_payout is not None:
+        clipped = min(max(default_payout, 0.0), 1.0)
+        print(f"  Payout over FY{recent[0][0]}-FY{recent[-1][0]}: {default_payout:.0%}"
+              + (" (capped at 0-100%)" if clipped != default_payout else ""))
+        default_payout = clipped
+    current_payout = prompt_number(
+        "  Payout ratio as a percent " + (f"(Enter for {default_payout:.0%}): " if default_payout is not None else ": "),
+        default=default_payout * 100 if default_payout is not None else None) / 100
+    print(f"  -> growth in book equity now: {current_roe:.1%} x (1 - {current_payout:.0%}) "
+          f"= {current_roe * (1 - current_payout):.1%}")
+
+    industry_roe, roe_date = industry_average(damodaran, "roe", mix)
+    print(f"\n  Cost of equity: {coe:.2%}")
+    if industry_roe is not None:
+        print(f"  Industry ROE: {industry_roe:.1%}  ({' + '.join(n for n, _ in mix)}; Damodaran, {roe_date})")
+        default_stable = industry_roe
+    else:
+        print("  Damodaran's industry ROE isn't available — defaulting stable ROE to the cost of equity")
+        print("  (no excess returns in stable growth).")
+        default_stable = coe
+    stable_roe = prompt_number(f"  Stable ROE the firm converges to, as a percent (Enter for {default_stable:.1%}): ",
+                               default=default_stable * 100) / 100
+    years = int(prompt_number("  Years to reach stable ROE and payout (Enter for 5): ", default=5))
+    years = min(max(years, 1), 20)
+    tg_input = input(f"  Terminal growth (Enter for {DEFAULT_TERMINAL_GROWTH:.2%}, roughly long-run GDP growth): ").strip()
+    terminal_growth = parse_number(tg_input) / 100 if tg_input else DEFAULT_TERMINAL_GROWTH
+    if terminal_growth >= risk_free_rate:
+        print(f"  ⚠ Terminal growth is at or above the risk-free rate ({risk_free_rate:.2%}).")
+
+    dilution, dil_label, _dil_source = latest_reported_dilution(facts)
+    shares = shares_out + (dilution or 0.0)
+    print(f"  Shares: {shares_out:,.0f} basic + {dilution or 0:,.0f} dilutive"
+          + (f" ({dil_label})" if dil_label else "") + f" = {shares:,.0f}")
+
+    try:
+        roe_path, payout_path, stable_payout = model.financial_firm_paths(
+            current_roe, stable_roe, current_payout, terminal_growth, years)
+        breakdown = model.excess_return_equity_value(common_bv, roe_path, payout_path, coe, stable_roe,
+                                                     terminal_growth, return_breakdown=True)
+        value_range = model.run_excess_return_range(common_bv, current_roe, stable_roe, current_payout, coe,
+                                                    terminal_growth, shares, years)
+    except ValueError as e:
+        print(f"  ⚠ Can't value with these inputs: {e}")
+        return
+
+    print(f"\n  {'Yr':>3}{'ROE':>8}{'Payout':>8}{'Begin book equity':>20}{'Excess return':>16}")
+    bv = common_bv
+    for t in range(years):
+        print(f"  {t + 1:>3}{roe_path[t]:>8.1%}{payout_path[t]:>8.0%}{bv:>20,.0f}"
+              f"{(roe_path[t] - coe) * bv:>16,.0f}")
+        bv = breakdown["book_path"][t]
+    print(f"  Stable: ROE {stable_roe:.1%}, payout {stable_payout:.0%} (= 1 - g/ROE), growth {terminal_growth:.2%}")
+
+    print(f"\n  Book equity:                 ${common_bv:>18,.0f}")
+    print(f"  + PV of excess returns:      ${breakdown['pv_excess']:>18,.0f}   (years 1-{years})")
+    print(f"  + PV of terminal excess:     ${breakdown['pv_terminal']:>18,.0f}")
+    print(f"  = Common equity value:       ${breakdown['equity']:>18,.0f}")
+
+    print(f"\n  Assumptions: cost of equity {coe:.2%} (beta {beta_source}; ERP {erp_source})")
+    print(f"\n{'='*60}")
+    print(f"  VALUATION RANGE — {summary['company']} ({summary['ticker']}), excess return model")
+    print(f"{'='*60}")
+    if share_price:
+        print(f"  Current market price: ${share_price:,.2f}\n")
+    for label in ("low", "base", "high"):
+        r = value_range[label]
+        print(f"  {label.upper():5s}: ${r['value_per_share']:>10,.2f} per share   "
+              f"(cost of equity={r['cost_of_equity']:.2%}, terminal growth={r['terminal_growth_rate']:.2%})")
+    base = value_range["base"]["value_per_share"]
+    print(f"\n  Price / book: market {share_price * shares / common_bv:.2f}x, "
+          f"this value {breakdown['equity'] / common_bv:.2f}x" if share_price and common_bv > 0 else "")
+
+    # What stable ROE does the price imply (everything else held)? Value
+    # rises with stable ROE, so bisect between just above g and 100%.
+    if share_price:
+        def value_at(roe):
+            r_path, p_path, _ = model.financial_firm_paths(current_roe, roe, current_payout, terminal_growth, years)
+            return model.excess_return_equity_value(common_bv, r_path, p_path, coe, roe, terminal_growth) / shares
+        lo, hi = terminal_growth + 1e-4, 1.0
+        if value_at(lo) <= share_price <= value_at(hi):
+            for _ in range(100):
+                mid = (lo + hi) / 2
+                lo, hi = (mid, hi) if value_at(mid) < share_price else (lo, mid)
+            print(f"  The price (${share_price:,.2f}) implies a stable ROE of {lo:.1%} "
+                  f"(vs. {stable_roe:.1%} assumed, cost of equity {coe:.2%}).")
+
+    summary["excess_return"] = {label: value_range[label]["value_per_share"] for label in ("low", "base", "high")}
+    summary["excess_return"].update(current_roe=current_roe, stable_roe=stable_roe, payout=current_payout,
+                                    common_book_equity=common_bv)
+    summary["terminal_growth"] = terminal_growth
+
+
 def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, reit=False,
-                       cyclical=False):
+                       cyclical=False, financial=False):
     """
     Interactive valuation of one company. Prints the full build, and
     returns a summary dict of the key inputs and results (beta, ERP, WACC,
@@ -2507,11 +2684,14 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
                     period_label = f"TTM to {pretax_info['as_of']}"
         if fx_currency and latest_rebuilt["unit"] == fx_currency:
             latest_rebuilt = {**latest_rebuilt, "val": latest_rebuilt["val"] * fx_rate}
-        print("  'EBIT / operating income' isn't tagged — this company's income statement has no")
-        print(f"  operating-income line. Rebuilt as pretax income + interest expense ({period_label}): "
-              f"${latest_rebuilt['val']:,.0f}")
-        ebit = prompt_number("  Press Enter to use it, or type a corrected EBIT (in dollars): ",
-                             default=latest_rebuilt["val"])
+        if financial:
+            ebit = latest_rebuilt["val"]  # unused: --financial values the equity, not the firm
+        else:
+            print("  'EBIT / operating income' isn't tagged — this company's income statement has no")
+            print(f"  operating-income line. Rebuilt as pretax income + interest expense ({period_label}): "
+                  f"${latest_rebuilt['val']:,.0f}")
+            ebit = prompt_number("  Press Enter to use it, or type a corrected EBIT (in dollars): ",
+                                 default=latest_rebuilt["val"])
     else:
         ebit = get_metric_value(financials, "operating_income", "EBIT / operating income", stale)
 
@@ -2528,7 +2708,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     # distortion gets fixed before falling back to margin normalization.
     rd_result = None
     latest_rd_raw, _rd_tag, _rd_fy, _rd_unit = get_latest_annual_value(facts, METRIC_TAGS["rd_expense"])
-    if latest_rd_raw is not None:
+    if latest_rd_raw is not None and not financial:
         # Convert ONLY if THIS metric's own unit is actually fx_currency —
         # a filer can convenience-translate most figures to USD while
         # leaving a specific disclosure (e.g. a notes-only line item) in
@@ -2589,7 +2769,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     is_trough = (full_cycle is not None and reported_margin is not None and full_cycle["mean"] > 0
                  and reported_margin < 0.5 * full_cycle["mean"])
     cycle_choice = None
-    if ebit < 0 or is_trough or (cyclical and full_cycle is not None):
+    if not financial and (ebit < 0 or is_trough or (cyclical and full_cycle is not None)):
         reason = ("latest FY is negative" if ebit < 0 else
                   "latest FY looks like a cyclical trough" if is_trough else "--cyclical")
         print(f"\n{'='*60}")
@@ -2758,7 +2938,9 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     if ll_val and ll_fy is not None and ll_fy >= latest_fy_all:
         if fx_currency and ll_unit == fx_currency:
             ll_val *= fx_rate
-    if ifrs_leases:
+    if financial:
+        pass  # leases are an operating-side adjustment; the equity model doesn't use debt
+    elif ifrs_leases:
         print(f"\n{'='*60}")
         print("  Leases (treated as debt, Damodaran-style — IFRS 16)")
         print(f"{'='*60}")
@@ -2870,7 +3052,19 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
             print("  his regional tables can be used by typing an unlevered beta below.")
         sic, sic_description = get_sic(cik)
         mix = choose_industries(ticker, sic, sic_description, industries, biotech)
-        if mix:
+        if mix and financial:
+            # Damodaran uses a bank's or broker's industry beta as is: its
+            # D/E is mostly deposits, so unlevering and relevering it means
+            # nothing (and regulation keeps leverage similar across firms).
+            unlevered = model.weighted_unlevered_beta([(industries[name]["beta"], weight) for name, weight in mix])
+            industry_beta = unlevered
+            for name, weight in mix:
+                print(f"    {name:<42} beta {industries[name]['beta']:.2f}  ({industries[name]['firms']} firms)"
+                      + (f"  x {weight:.0%}" if len(mix) > 1 else ""))
+            print(f"  Industry beta: {industry_beta:.2f}  (levered, used as is — no relevering for a financial firm)")
+            print(f"  (Damodaran's US industry betas, updated {damodaran['betas']['updated']})")
+            industry_label = " + ".join(name for name, _ in mix)
+        elif mix:
             unlevered = model.weighted_unlevered_beta(
                 [(industries[name]["unlevered_beta_cash"], weight) for name, weight in mix])
             industry_beta = model.relever_beta(unlevered, marginal_tax_rate, debt_to_equity)
@@ -2889,6 +3083,9 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         answer = input(f"  Press Enter to use the industry beta {industry_beta:.2f}, or type an UNLEVERED beta\n"
                        "  to relever instead: ").strip().lower()
         answer = "" if answer == "r" else answer
+    elif industry_beta is not None and financial:
+        answer = input(f"  Press Enter to use the industry beta {industry_beta:.2f}, type r for the regression\n"
+                       "  beta, or type a beta to use as is: ").strip().lower()
     elif industry_beta is not None:
         answer = input(f"  Press Enter to use the industry beta {industry_beta:.2f}, type r for the regression\n"
                        "  beta, or type an UNLEVERED beta to relever instead: ").strip().lower()
@@ -2901,7 +3098,16 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         beta = regression_beta
     elif not answer:
         beta = industry_beta
-        beta_source = f"industry: {industry_label}, unlevered {unlevered:.2f}, relevered"
+        beta_source = (f"industry: {industry_label}, levered, as is" if financial else
+                       f"industry: {industry_label}, unlevered {unlevered:.2f}, relevered")
+    elif financial:
+        try:
+            beta = parse_number(answer)
+            beta_source = "typed"
+        except ValueError:
+            print("  Couldn't read that — using the industry beta.")
+            beta = industry_beta if industry_beta is not None else regression_beta
+            beta_source = f"industry: {industry_label}, levered, as is" if industry_beta is not None else beta_source
     else:
         try:
             typed_unlevered = parse_number(answer)
@@ -2983,6 +3189,11 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     # discount model below needs cost of equity too, before WACC exists.
     coe = model.cost_of_equity(risk_free_rate, beta, erp)
     summary.update(beta=beta, risk_free_rate=risk_free_rate, erp=erp, cost_of_equity=coe)
+
+    if financial:
+        run_financial_firm_valuation(summary, facts, fx_currency, fx_rate, book_equity, shares_out,
+                                     share_price, coe, damodaran, mix, risk_free_rate, beta_source, erp_source)
+        return summary
 
     # ---- Reinvestment-rate-derived growth (Damodaran fundamental growth) ----
     # NOTE: change in net working capital defaults to 0 here, same simplification
@@ -4130,6 +4341,12 @@ if __name__ == "__main__":
              "rate) cross-check.",
     )
     parser.add_argument(
+        "--financial", action="store_true",
+        help="Bank / brokerage mode: values the equity with Damodaran's excess return model "
+             "(book equity + PV of ROE above the cost of equity) instead of the FCFF DCF, "
+             "whose debt, EBIT and reinvestment don't mean anything for a financial firm.",
+    )
+    parser.add_argument(
         "--cyclical", action="store_true",
         help="Cyclical mode: always normalizes EBIT to the company's average margin over "
              "a full cycle (up to 10 years, loss years included), with a year-by-year "
@@ -4139,4 +4356,5 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    run_full_valuation(args.ticker, args.stage, args.narrative, args.biotech, args.reit, args.cyclical)
+    run_full_valuation(args.ticker, args.stage, args.narrative, args.biotech, args.reit, args.cyclical,
+                       args.financial)

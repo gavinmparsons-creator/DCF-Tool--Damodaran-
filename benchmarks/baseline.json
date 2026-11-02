@@ -198,6 +198,24 @@
     "wacc": 0.06832314744766281,
     "working_capital_ratio": 1.3966999999999998
   },
+  "SCHW": {
+    "beta": 1.17,
+    "company": "SCHWAB CHARLES CORP",
+    "cost_of_equity": 0.09854000000000002,
+    "erp": 0.042,
+    "excess_return": {
+      "base": 54.53871526952788,
+      "common_book_equity": 43934000000,
+      "current_roe": 0.2148070641077991,
+      "high": 65.7146652182505,
+      "low": 47.0896384851261,
+      "payout": 0.8532139775668681,
+      "stable_roe": 0.1777
+    },
+    "risk_free_rate": 0.049400000000000006,
+    "terminal_growth": 0.025,
+    "ticker": "SCHW"
+  },
   "SNOW": {
     "adr_ratio": 1.0,
     "beta": 1.2720881302228706,

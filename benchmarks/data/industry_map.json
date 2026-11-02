@@ -53,6 +53,15 @@
     ],
     "sic": 6798
   },
+  "SCHW": {
+    "industries": [
+      [
+        "Brokerage & Investment Banking",
+        1.0
+      ]
+    ],
+    "sic": 6211
+  },
   "SNOW": {
     "industries": [
       [
