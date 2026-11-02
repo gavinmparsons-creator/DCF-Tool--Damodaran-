@@ -2429,7 +2429,11 @@ def print_terminal_share(breakdown, years):
 # (after preferred dividends), common equity (total less preferred), and
 # cash returned to common holders (dividends + buybacks).
 COMMON_NET_INCOME_TAGS = ["NetIncomeLossAvailableToCommonStockholdersBasic"]
-PREFERRED_EQUITY_TAGS = ["PreferredStockValue", "PreferredStockValueOutstanding"]
+# Carrying value first: some banks tag PreferredStockValue at par alone
+# (Capital One: $0 on $0.01 par) and put the real $5.4B in the APIC tag.
+PREFERRED_EQUITY_TAGS = ["PreferredStockIncludingAdditionalPaidInCapitalNetOfDiscount",
+                         "PreferredStockIncludingAdditionalPaidInCapital",
+                         "PreferredStockValue", "PreferredStockValueOutstanding"]
 PREFERRED_DIVIDEND_TAGS = ["DividendsPreferredStockCash", "DividendsPreferredStock",
                            "PreferredStockDividendsIncomeStatementImpact"]
 COMMON_DIVIDEND_TAGS = ["PaymentsOfDividendsCommonStock", "DividendsCommonStockCash", "DividendsCommonStock"]
