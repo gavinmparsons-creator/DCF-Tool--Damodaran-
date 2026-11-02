@@ -1578,6 +1578,7 @@ DAMODARAN_MARGIN_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/data
 DAMODARAN_WC_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/wcdata.html"
 DAMODARAN_ROIC_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/roc.html"
 DAMODARAN_ROE_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/roe.html"
+DAMODARAN_CAPEX_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/capex.html"
 COUNTRY_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "country_map.json")
 EDGAR_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -1716,10 +1717,10 @@ def parse_damodaran_spreads(page):
             if {"AAA", "BBB", "D"} <= set(spreads) else None)
 
 
-def _parse_industry_column(page, column):
-    """{industry: value} for one percentage column of a Damodaran industry
-    table, found by header name; with the page's "Updated in ..." date.
-    None if the column isn't there."""
+def _parse_industry_column(page, column, percent=True):
+    """{industry: value} for one column of a Damodaran industry table,
+    found by header name; with the page's "Updated in ..." date. None if
+    the column isn't there. percent=False for a plain ratio (e.g. 2.80)."""
     rows = _html_table_rows(page)
     header = next((r for r in rows if r and r[0] == "Industry Name"), None)
     if header is None or column not in header:
@@ -1729,7 +1730,7 @@ def _parse_industry_column(page, column):
     for r in rows:
         if len(r) > i and r[0] not in ("", "Industry Name"):
             try:
-                values[r[0]] = float(r[i].rstrip("%")) / 100
+                values[r[0]] = float(r[i].rstrip("%")) / (100 if percent else 1)
             except ValueError:
                 continue
     updated = re.search(r"(?i)Updated in ([A-Za-z]+ \d{4})", page)
@@ -1754,6 +1755,13 @@ def parse_damodaran_roe(page):
     """Industry return on equity (net income / book equity), unadjusted —
     the stable-ROE anchor for banks and brokerages (--financial)."""
     return _parse_industry_column(page, "ROE (unadjusted)")
+
+
+def parse_damodaran_sales_to_capital(page):
+    """Industry sales / invested capital (trailing 12 months) — the
+    narrative DCF's default reinvestment ratio. Invested capital here is
+    book debt + equity - cash, goodwill included, R&D not capitalized."""
+    return _parse_industry_column(page, "Sales/ Invested Capital (LTM)", percent=False)
 
 
 def parse_damodaran_working_capital(page):
@@ -1793,7 +1801,8 @@ def load_damodaran_data():
                                ("margins", DAMODARAN_MARGIN_URL, parse_damodaran_margins),
                                ("roic", DAMODARAN_ROIC_URL, parse_damodaran_roic),
                                ("wc", DAMODARAN_WC_URL, parse_damodaran_working_capital),
-                               ("roe", DAMODARAN_ROE_URL, parse_damodaran_roe)):
+                               ("roe", DAMODARAN_ROE_URL, parse_damodaran_roe),
+                               ("s2c", DAMODARAN_CAPEX_URL, parse_damodaran_sales_to_capital)):
         if is_fresh(piece):
             continue
         page = fetch_text_or_none(url)
@@ -1812,7 +1821,7 @@ def load_damodaran_data():
         except OSError:
             pass  # caching is a convenience; the run continues without it
     return {piece: cache[piece]["data"] if piece in cache else None
-            for piece in ("betas", "erp", "countries", "ratings", "margins", "roic", "wc", "roe")}
+            for piece in ("betas", "erp", "countries", "ratings", "margins", "roic", "wc", "roe", "s2c")}
 
 
 # The US Treasury's daily par yield curve, one CSV per calendar year,
@@ -4117,15 +4126,28 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
             print(f"  Must be 1-{narrative_years} — using year {narrative_years}.")
             margin_convergence_years = None
         trailing_s2c = revenue / invested_capital if invested_capital else None
+        # Damodaran's industry ratio is the default: a company's own is
+        # skewed by its acquisition history (Global Payments: 0.25, from
+        # $46B of goodwill and acquired intangibles) or by the research
+        # asset this tool capitalizes (ARM: 0.50), and is negative or
+        # meaningless for a young firm.
+        industry_s2c, s2c_date = industry_average(damodaran, "s2c", mix)
         print("  Sales-to-capital ratio: how much new revenue $1 of new capital buys (2.0 ="
               " $1 buys $2 of revenue).")
         print(f"  This company's own trailing ratio (revenue / invested capital): " +
               (f"{trailing_s2c:.2f}" if trailing_s2c else "n/a") +
-              " — noisy for a young firm; an industry average is usually better.")
-        s2c_input = input("  Sales-to-capital ratio (e.g. 2 for 2.0; Enter to use the trailing ratio "
-                           "above, or 1.0 if unavailable): ").strip()
-        sales_to_capital = (parse_number(s2c_input) if s2c_input
-                             else (trailing_s2c if trailing_s2c and trailing_s2c > 0 else 1.0))
+              " — skewed by past acquisitions and capitalized R&D.")
+        if industry_s2c:
+            print(f"  Industry: {industry_s2c:.2f}  ({' + '.join(n for n, _ in mix)}; Damodaran, {s2c_date};"
+                  " goodwill in,")
+            print("  R&D not capitalized — a little generous for an R&D-heavy company here).")
+            default_s2c, default_label = industry_s2c, f"the industry's {industry_s2c:.2f}"
+        elif trailing_s2c and trailing_s2c > 0:
+            default_s2c, default_label = trailing_s2c, f"the trailing {trailing_s2c:.2f}"
+        else:
+            default_s2c, default_label = 1.0, "1.0"
+        s2c_input = input(f"  Sales-to-capital ratio (e.g. 2 for 2.0; Enter for {default_label}): ").strip()
+        sales_to_capital = parse_number(s2c_input) if s2c_input else default_s2c
 
         # ---- NOL tax-rate ramp: accumulated net operating losses shelter
         # future taxable income, so the effective rate should start near
