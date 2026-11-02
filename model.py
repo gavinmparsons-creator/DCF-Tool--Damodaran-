@@ -1567,6 +1567,91 @@ def cycle_margin_stats(ebit_by_year, revenue_by_year):
 
 
 # ---------------------------------------------------------------------
+# FINANCIAL SERVICE FIRMS (banks, brokerages): Damodaran values these at
+# the EQUITY level. Debt (deposits, borrowings) is raw material, not
+# financing, so a cost of capital and an enterprise value mean nothing;
+# reinvestment is the equity retained to keep regulatory capital up as
+# the balance sheet grows, not capex. His preferred tool is the excess
+# return model: equity = book equity today + present value of the return
+# earned above the cost of equity on it. A bank earning exactly its cost
+# of equity is worth its book value.
+# ---------------------------------------------------------------------
+
+def financial_firm_paths(current_roe, stable_roe, current_payout, terminal_growth_rate, years=5):
+    """
+    Year-by-year ROE and payout for the excess return model. ROE moves
+    linearly from current_roe to stable_roe by the final year (same
+    convention as project_margin_path); payout moves linearly to the
+    stable payout that's consistent with terminal growth, 1 - g / ROE
+    (in stable growth a firm can only retain what growth needs).
+    Returns (roe_path, payout_path, stable_payout).
+    """
+    if years < 1:
+        raise ValueError("years must be at least 1")
+    if stable_roe <= 0 or terminal_growth_rate > stable_roe:
+        raise ValueError("stable ROE must be positive and at least the terminal growth rate")
+    stable_payout = 1 - terminal_growth_rate / stable_roe
+    roe_path = [current_roe + (stable_roe - current_roe) * t / years for t in range(1, years + 1)]
+    payout_path = [current_payout + (stable_payout - current_payout) * t / years for t in range(1, years + 1)]
+    return roe_path, payout_path, stable_payout
+
+
+def excess_return_equity_value(book_equity, roe_path, payout_path, cost_of_equity, stable_roe,
+                               terminal_growth_rate, return_breakdown=False):
+    """
+    Damodaran's excess return model for a financial service firm:
+
+        equity = BV_0 + sum PV[(ROE_t - COE) x BV_(t-1)] + PV(terminal)
+
+    Book equity grows by retained earnings: BV_t = BV_(t-1) x (1 + ROE_t x
+    (1 - payout_t)). Terminal: the year-after excess return, (stable ROE -
+    COE) x BV_n, growing at g forever, so / (COE - g). Under clean-surplus
+    accounting this equals discounting the cash returned to shareholders
+    (NI - change in book equity), which the self-test checks.
+
+    Returns common equity value, or with return_breakdown=True
+    {"equity", "book_equity", "pv_excess", "pv_terminal", "book_path"}.
+    """
+    if len(roe_path) != len(payout_path) or not roe_path:
+        raise ValueError("roe_path and payout_path must be the same non-zero length")
+    if cost_of_equity <= terminal_growth_rate:
+        raise ValueError("cost of equity must exceed terminal growth")
+    bv = book_equity
+    book_path, pv_excess = [], 0.0
+    for t, (roe, payout) in enumerate(zip(roe_path, payout_path), start=1):
+        pv_excess += (roe - cost_of_equity) * bv / (1 + cost_of_equity) ** t
+        bv *= 1 + roe * (1 - payout)
+        book_path.append(bv)
+    n = len(roe_path)
+    terminal = (stable_roe - cost_of_equity) * bv / (cost_of_equity - terminal_growth_rate)
+    pv_terminal = terminal / (1 + cost_of_equity) ** n
+    equity = book_equity + pv_excess + pv_terminal
+    if return_breakdown:
+        return {"equity": equity, "book_equity": book_equity, "pv_excess": pv_excess,
+                "pv_terminal": pv_terminal, "book_path": book_path}
+    return equity
+
+
+def run_excess_return_range(book_equity, current_roe, stable_roe, current_payout, cost_of_equity,
+                            terminal_growth_rate, shares, years=5, coe_spread=0.01, growth_spread=0.005):
+    """Low/base/high per-share values, flexing cost of equity and terminal
+    growth the same way the other ranges do (payout and ROE paths rebuilt
+    per scenario, since the stable payout depends on g)."""
+    scenarios = {
+        "low":  (cost_of_equity + coe_spread, terminal_growth_rate - growth_spread),
+        "base": (cost_of_equity, terminal_growth_rate),
+        "high": (cost_of_equity - coe_spread, terminal_growth_rate + growth_spread),
+    }
+    results = {}
+    for label, (coe, tgr) in scenarios.items():
+        roe_path, payout_path, _ = financial_firm_paths(current_roe, stable_roe, current_payout, tgr, years)
+        equity = excess_return_equity_value(book_equity, roe_path, payout_path, coe, stable_roe, tgr)
+        results[label] = {"cost_of_equity": coe, "terminal_growth_rate": tgr,
+                          "equity_value": equity, "value_per_share": equity / shares}
+    return results
+
+
+# ---------------------------------------------------------------------
 # SELF-TEST: validate the math against a simple worked example.
 # Run this file directly (python3 model.py) to see it check itself.
 # ---------------------------------------------------------------------
@@ -2329,5 +2414,29 @@ if __name__ == "__main__":
         "A rating missing from the published table must keep the built-in spread!"
     published_cod = synthetic_cost_of_debt(260, 100, 0.05, True, {"BBB": 0.0111})
     assert abs(published_cod[0] - 0.0611) < 1e-12, "Synthetic cost of debt must use the published spread!"
+
+    # Excess return model (financial firms), worked by hand: BV 100, one
+    # year at ROE 15% / payout 50%, COE 10%, stable ROE 12%, g 3%.
+    #   year 1 excess (15% - 10%) x 100 = 5        -> PV 5 / 1.1 = 4.5455
+    #   BV_1 = 100 x (1 + 0.15 x 0.5) = 107.5
+    #   terminal (12% - 10%) x 107.5 / (10% - 3%) = 30.714 -> PV 27.922
+    #   equity = 100 + 4.5455 + 27.922 = 132.468
+    erm = excess_return_equity_value(100, [0.15], [0.5], 0.10, 0.12, 0.03, return_breakdown=True)
+    print(f"\nExcess return model: {erm['equity']:.4f}  (expected 132.4675)")
+    assert abs(erm["equity"] - (100 + 5 / 1.1 + 0.02 * 107.5 / 0.07 / 1.1)) < 1e-9, "Excess return model mismatch!"
+    # Earning exactly the cost of equity is worth exactly book value.
+    assert abs(excess_return_equity_value(100, [0.10] * 5, [0.3] * 5, 0.10, 0.10, 0.03) - 100) < 1e-9, \
+        "ROE = COE must be worth book value!"
+    # Clean surplus: same value as discounting cash returned (NI - change in BV).
+    roe_p, pay_p, stable_pay = financial_firm_paths(0.20, 0.13, 0.85, 0.025, years=5)
+    assert abs(roe_p[-1] - 0.13) < 1e-12 and abs(pay_p[-1] - (1 - 0.025 / 0.13)) < 1e-12, "Paths must end at stable!"
+    bv, pv_cash = 50.0, 0.0
+    for t, (r, p) in enumerate(zip(roe_p, pay_p), start=1):
+        pv_cash += r * bv * p / 1.09 ** t
+        bv *= 1 + r * (1 - p)
+    pv_cash += 0.13 * bv * stable_pay / (0.09 - 0.025) / 1.09 ** 5
+    erm_value = excess_return_equity_value(50.0, roe_p, pay_p, 0.09, 0.13, 0.025)
+    print(f"Excess return {erm_value:.6f} vs cash-returned DDM {pv_cash:.6f}  (must match)")
+    assert abs(erm_value - pv_cash) < 1e-9, "Excess return model must equal the cash-returned DDM!"
 
     print("\n✓ All self-tests passed. The math is internally consistent.")
