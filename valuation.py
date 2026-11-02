@@ -1115,6 +1115,7 @@ TOTAL_DEBT_TAGS = [
     "NotesPayable",
     "ConvertibleNotesPayable",
     "SeniorNotes",
+    "LongTermNotesAndLoans",  # e.g. Lithium Americas' DOE loan ($988M drawn, June 2026)
 ]
 
 
@@ -1137,7 +1138,7 @@ def resolve_total_debt(financials, facts_json, stale, fx_currency, fx_rate):
     stale_total = sum(financials[k]["value"] for k in stale_keys)
     print(f"\n  Debt: {', '.join(stale_keys)} last reported FY"
           f"{min(financials[k]['fiscal_year'] for k in stale_keys)} (${stale_total:,.0f}) — stale.")
-    val, tag, fy, unit = freshest_annual_value(facts_json, TOTAL_DEBT_TAGS)
+    val, tag, fy, unit = freshest_instant(facts_json, TOTAL_DEBT_TAGS)  # latest 10-Q, like cash and debt
     if val is not None and fy is not None and fy >= latest_fy:
         if fx_currency and unit == fx_currency:
             val *= fx_rate
