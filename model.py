@@ -1698,6 +1698,76 @@ def run_excess_return_range(book_equity, current_roe, stable_roe, current_payout
 
 
 # ---------------------------------------------------------------------
+# PRE-PRODUCTION PROJECTS (a mine or plant still being built — Lithium
+# Americas, USA Rare Earth): no revenue to grow from, so neither DCF
+# applies. Damodaran values these as the project: the cash flows the
+# finished asset will produce, minus what it still costs to build and
+# the company's overhead until then, discounted at the cost of capital,
+# with a separate probability that it never gets there (failure overlay).
+# Every operating input comes from the company's technical report or
+# guidance, not EDGAR — there's nothing in the filings to project from.
+# ---------------------------------------------------------------------
+
+def project_cash_flow_paths(full_revenue, operating_margin, build_years, ramp_years, remaining_capex,
+                            annual_overhead, life_years=None):
+    """
+    Year-by-year revenue, EBIT and capex for a project:
+
+      years 1..build_years      : no revenue; EBIT = -annual_overhead;
+                                  remaining_capex spread evenly
+      next ramp_years           : revenue = full_revenue x k / ramp_years
+                                  (k = 1..ramp_years); EBIT = revenue x margin
+      after that                : full_revenue x margin
+
+    With life_years (a mine's reserve life), production runs that many
+    years and stops; the paths cover the whole life. Without (a plant that
+    runs indefinitely), the paths end the year full output is reached and
+    the caller adds a terminal value. Sustaining capex is assumed equal to
+    depreciation once operating (no-growth steady state), so it isn't a
+    separate line: operating_margin is after depreciation.
+    Returns {"revenue", "ebit", "capex"} lists.
+    """
+    if build_years < 0 or ramp_years < 1:
+        raise ValueError("build_years must be >= 0 and ramp_years >= 1")
+    if life_years is not None and life_years < 1:
+        raise ValueError("life_years must be at least 1")
+    production_years = life_years if life_years is not None else ramp_years
+    revenue, ebit, capex = [], [], []
+    for _ in range(build_years):
+        revenue.append(0.0)
+        ebit.append(-annual_overhead)
+        capex.append(remaining_capex / build_years)
+    for k in range(1, production_years + 1):
+        rev = full_revenue * min(k, ramp_years) / ramp_years
+        revenue.append(rev)
+        ebit.append(rev * operating_margin)
+        capex.append(0.0 if build_years else (remaining_capex if k == 1 else 0.0))
+    return {"revenue": revenue, "ebit": ebit, "capex": capex}
+
+
+def project_value(paths, tax_rates, discount_rate, terminal_tax_rate, perpetual=True):
+    """
+    Present value of a project's cash flows: FCFF_t = EBIT_t x (1 - tax_t)
+    - capex_t (a loss year pays no tax; see nol_tax_rate_path), discounted
+    at discount_rate. A perpetual project adds a terminal value at the end
+    of the paths: next year's NOPAT at full output / discount_rate — with
+    new investment earning only its cost of capital (Damodaran's default),
+    growth adds nothing, so no growth rate is needed.
+    Returns {"value", "pv_explicit", "pv_terminal", "fcff"}.
+    """
+    if len(tax_rates) != len(paths["ebit"]):
+        raise ValueError("tax_rates must match the paths' length")
+    fcff = [e * (1 - t) - c for e, t, c in zip(paths["ebit"], tax_rates, paths["capex"])]
+    pv_explicit = sum(f / (1 + discount_rate) ** t for t, f in enumerate(fcff, start=1))
+    pv_terminal = 0.0
+    if perpetual:
+        steady_nopat = paths["ebit"][-1] * (1 - terminal_tax_rate)
+        pv_terminal = steady_nopat / discount_rate / (1 + discount_rate) ** len(fcff)
+    return {"value": pv_explicit + pv_terminal, "pv_explicit": pv_explicit,
+            "pv_terminal": pv_terminal, "fcff": fcff}
+
+
+# ---------------------------------------------------------------------
 # SELF-TEST: validate the math against a simple worked example.
 # Run this file directly (python3 model.py) to see it check itself.
 # ---------------------------------------------------------------------
@@ -2494,5 +2564,23 @@ if __name__ == "__main__":
     cod_rated = cost_of_debt_from_rating("Baa2", 0.05, {"BBB": 0.0111})
     assert abs(cod_rated[0] - 0.0611) < 1e-12 and cod_rated[1] == "BBB", "Actual-rating cost of debt mismatch!"
     print("Actual ratings map to the spread table (Baa2 -> BBB: 5% + 1.11% = 6.11%)")
+
+    # Project NPV, worked by hand: 1 build year ($100 capex, $10 overhead),
+    # then full output at once ($100 revenue, 40% margin, 25% tax), 10%.
+    #   year 1: EBIT -10, no tax, FCFF -10 - 100 = -110 -> PV -100
+    #   year 2: EBIT 40, FCFF 30 -> PV 24.793
+    #   perpetual: terminal 30 / 0.10 = 300 at year 2 -> PV 247.934; total 172.727
+    #   2-year mine life instead: year 3 FCFF 30 -> PV 22.539; total -52.668
+    proj = project_cash_flow_paths(100, 0.40, 1, 1, 100, 10)
+    pv = project_value(proj, [0.0, 0.25], 0.10, 0.25)
+    print(f"\nProject NPV (perpetual): {pv['value']:.4f}  (expected 172.7273)")
+    assert abs(pv["value"] - (-110 / 1.1 + 30 / 1.21 + 300 / 1.21)) < 1e-9, "Project NPV mismatch!"
+    mine = project_cash_flow_paths(100, 0.40, 1, 1, 100, 10, life_years=2)
+    pv_mine = project_value(mine, [0.0, 0.25, 0.25], 0.10, 0.25, perpetual=False)
+    assert abs(pv_mine["value"] - (-110 / 1.1 + 30 / 1.21 + 30 / 1.331)) < 1e-9, "Finite-life project mismatch!"
+    ramp = project_cash_flow_paths(100, 0.40, 2, 4, 100, 10)
+    assert ramp["revenue"] == [0.0, 0.0, 25.0, 50.0, 75.0, 100.0] and ramp["capex"] == [50.0, 50.0, 0, 0, 0, 0], \
+        "Project ramp / capex timing mismatch!"
+    print(f"Project, 2-year mine life: {pv_mine['value']:.4f}  (expected -52.6672); ramp timing checks out")
 
     print("\n✓ All self-tests passed. The math is internally consistent.")
