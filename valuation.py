@@ -3380,6 +3380,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         latest_interest_expense *= fx_rate
     is_large_firm = market_cap > LARGE_FIRM_MARKET_CAP
     synthetic_cod, interest_coverage, synthetic_rating, default_spread = None, None, None, None
+    actual_rating, rating_asked = None, False  # asked with the cost of debt, reused by the failure overlay
     if lease_interest:
         # Leases are debt now, so their interest counts toward coverage.
         latest_interest_expense = (latest_interest_expense or 0.0) + lease_interest
@@ -3401,14 +3402,37 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
               f"({risk_free_rate:.2%} risk-free + {default_spread:.2%} spread)")
         if damodaran.get("ratings"):
             print(f"  Spread: Damodaran's published spread for {synthetic_rating} "
-                  f"(as of {damodaran['ratings']['as_of']}). Override below with the company's")
-            print("  actual bond yield if you have one.")
+                  f"(as of {damodaran['ratings']['as_of']}).")
         else:
             print("  Spread values are the built-in illustrative ones (Damodaran's published table")
-            print("  couldn't be loaded) — override below with the company's actual bond yield.")
-        cod_input = input(f"  Press Enter to use {synthetic_cod:.2%}, or type an override as a "
+            print("  couldn't be loaded).")
+        # An actual rating beats the synthetic one when the company has
+        # one, and it matters most for a money-loser: negative operating
+        # income always maps to D (a 24% cost of debt for Tempus), which
+        # Damodaran says not to use for a going concern. The same rating
+        # sets the failure overlay's default probability below.
+        if ebit <= 0:
+            print("  Operating income isn't positive, so the synthetic rating is D — not meant for a going")
+            print("  concern. An actual bond rating gives a better cost of debt (and failure probability).")
+        rating_asked = True
+        default_cod, cod_label = synthetic_cod, f"the synthetic {synthetic_cod:.2%}"
+        while True:
+            typed = input("  Actual bond rating, if it has one (S&P or Moody's, e.g. BBB+ or Baa1 — in the 10-K's\n"
+                          "  debt discussion or on the agency's site; Enter to use the synthetic): ").strip()
+            if not typed:
+                break
+            rated_cod, rated_label, rated_spread = model.cost_of_debt_from_rating(
+                typed, risk_free_rate, (damodaran.get("ratings") or {}).get("spreads"))
+            if rated_cod is not None:
+                actual_rating = typed
+                default_cod, cod_label = rated_cod, f"{rated_cod:.2%} for the actual {typed}"
+                print(f"  Actual rating {typed} -> spread table row {rated_label}: {risk_free_rate:.2%} + "
+                      f"{rated_spread:.2%} = {rated_cod:.2%}")
+                break
+            print("    Couldn't read that as a rating (AAA down to D, S&P or Moody's).")
+        cod_input = input(f"  Press Enter to use {cod_label}, or type the company's actual bond yield as a "
                            "percent (e.g. 6 for 6%): ").strip()
-        cost_of_debt = parse_number(cod_input) / 100 if cod_input else synthetic_cod
+        cost_of_debt = parse_number(cod_input) / 100 if cod_input else default_cod
         if cod_input:
             print(f"  Using override cost of debt: {cost_of_debt:.2%}")
     else:
@@ -4318,8 +4342,13 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         # income: a money-loser always comes out D, and Damodaran's note on
         # that is not to use it for a going concern — use a real rating.
         rating, rating_source = None, None
-        if synthetic_rating and ebit > 0 and model.rating_bucket(synthetic_rating) not in (None, "D"):
+        if actual_rating and model.failure_probability_from_rating(actual_rating) is not None:
+            rating, rating_source = actual_rating, "actual rating, typed above"
+        elif synthetic_rating and ebit > 0 and model.rating_bucket(synthetic_rating) not in (None, "D"):
             rating, rating_source = synthetic_rating, "synthetic rating from interest coverage"
+        elif rating_asked:
+            print("  Operating income isn't positive and no actual rating was given above, so there's no")
+            print("  rating-implied default probability — type one below.")
         else:
             print("  Operating income isn't positive, so the synthetic rating (D) doesn't apply to a going")
             print("  concern. The company's actual bond rating (S&P or Moody's — in the 10-K's debt")
