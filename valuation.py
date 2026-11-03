@@ -2727,6 +2727,16 @@ def run_project_valuation(summary, facts, fx_currency, fx_rate, financials, book
         minority = 0.0
     dilution, dil_label, _dil_source = latest_reported_dilution(facts)
     shares = shares_out + (dilution or 0.0)
+    print(f"\n  Bridge: debt ${total_debt:,.0f}, minority interest ${minority:,.0f}, cash ${cash:,.0f}, "
+          f"shares {shares:,.0f}")
+    print("  (From the latest 10-Q — a deal closed since then, like USA Rare Earth's Serra Verde purchase,")
+    print("  isn't in it yet.)")
+    if input("  Press Enter to accept, or type e to edit: ").strip().lower() == "e":
+        total_debt = prompt_number(f"    Debt (Enter for ${total_debt:,.0f}): ", default=total_debt)
+        minority = prompt_number(f"    Minority interest (Enter for ${minority:,.0f}): ", default=minority)
+        cash = prompt_number(f"    Cash and investments (Enter for ${cash:,.0f}): ", default=cash)
+        shares = prompt_number(f"    Shares, including dilution (Enter for {shares:,.0f}): ", default=shares)
+        dilution = None
     equity = result["value"] - total_debt - minority + cash
     print(f"\n  PV of build years + production:  ${result['pv_explicit']:>18,.0f}")
     if life_years is None:
