@@ -3778,7 +3778,13 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     converts_in_debt = [financials[k]["tag"] for k in ("total_debt_current", "total_debt_noncurrent")
                         if financials.get(k, {}).get("tag") and "Convertible" in financials[k]["tag"]
                         and financials[k].get("value")]
-    other_dilution_shares = (other_dilution_shares or 0.0) * share_scale / adr_ratio  # filed in ordinary shares -> ADS units
+    # The scale fix only applies to diluted - basic: those are the same
+    # weighted-average tags the mis-scaled share count came from. Tempus
+    # files its anti-dilutive count in plain shares (23.4M), so scaling it
+    # too made 23.4 billion.
+    if dilution_source == "diluted-basic":
+        other_dilution_shares = (other_dilution_shares or 0.0) * share_scale
+    other_dilution_shares = (other_dilution_shares or 0.0) / adr_ratio  # filed in ordinary shares -> ADS units
 
     def show_bridge():
         print(f"  - Debt (incl. operating leases):          ${total_debt:>18,.0f}")
