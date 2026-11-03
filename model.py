@@ -294,6 +294,52 @@ def synthetic_credit_rating(interest_coverage_ratio, large_firm=True, spreads=No
     return table[-1][1], (spreads or {}).get(table[-1][1], table[-1][2])  # unreachable but safe
 
 
+# Moody's letter grades and notch digits, as S&P letters and +/-.
+_MOODYS_GRADES = {"AAA": "AAA", "AA": "AA", "A": "A", "BAA": "BBB", "BA": "BB", "B": "B",
+                  "CAA": "CCC", "CA": "CC", "C": "C"}
+_MOODYS_NOTCH = {"1": "+", "2": "", "3": "-"}
+
+
+def rating_table_label(rating):
+    """
+    The row of the rating/spread table (the labels in
+    LARGE_FIRM_RATING_TABLE: AAA, AA, A+, A, A-, BBB, BB+, BB, B+, B,
+    B-, CCC, CC, C, D) for an actual S&P- or Moody's-style rating — "A-",
+    "Baa2", "BB-", "Caa1". The table has fewer notches than the agencies,
+    so a notch it doesn't list goes to its own letter grade's row (BBB+
+    and BBB- -> BBB, BB- -> BB, AA+ -> AA, CCC+ -> CCC), never to a
+    neighbouring grade. None if it can't be read.
+    """
+    text = (rating or "").strip().split("/")[-1].strip()
+    if not text:
+        return None
+    letters = text.rstrip("+-0123456789")
+    notch = text[len(letters):]
+    moodys = notch in _MOODYS_NOTCH or (letters[:1].isupper() and letters[1:].islower() and len(letters) > 1)
+    if moodys:  # "Baa2", "Ba1", "B3", "Aaa" — digits or mixed case; S&P is all capitals with +/-
+        if letters.upper() not in _MOODYS_GRADES or (letters[1:] and not letters[1:].islower()):
+            return None
+        letters, notch = _MOODYS_GRADES[letters.upper()], _MOODYS_NOTCH.get(notch, "")
+    elif not letters.isupper():
+        return None
+    if letters not in ("AAA", "AA", "A", "BBB", "BB", "B", "CCC", "CC", "C", "D") or notch not in ("", "+", "-"):
+        return None
+    labels = {row[1] for row in LARGE_FIRM_RATING_TABLE}
+    return letters + notch if letters + notch in labels else letters
+
+
+def cost_of_debt_from_rating(rating, risk_free_rate, spreads=None):
+    """Cost of debt for an ACTUAL bond rating: risk-free + the default
+    spread for that rating's row (Damodaran's published spreads when
+    passed, else the built-in ones). Returns (cost, table_label, spread),
+    or (None, None, None) if the rating can't be read."""
+    label = rating_table_label(rating)
+    if label is None:
+        return None, None, None
+    spread = (spreads or {}).get(label, next(row[2] for row in LARGE_FIRM_RATING_TABLE if row[1] == label))
+    return risk_free_rate + spread, label, spread
+
+
 def synthetic_cost_of_debt(ebit, interest_expense, risk_free_rate, large_firm=True, spreads=None):
     """
     Damodaran's synthetic rating method, end to end: interest coverage
@@ -2438,5 +2484,15 @@ if __name__ == "__main__":
     erm_value = excess_return_equity_value(50.0, roe_p, pay_p, 0.09, 0.13, 0.025)
     print(f"Excess return {erm_value:.6f} vs cash-returned DDM {pv_cash:.6f}  (must match)")
     assert abs(erm_value - pv_cash) < 1e-9, "Excess return model must equal the cash-returned DDM!"
+
+    # Actual rating -> the spread table's row: notches the table lacks go
+    # to their own letter grade; Moody's and S&P spellings agree.
+    for typed, row in (("A-", "A-"), ("Baa2", "BBB"), ("BBB+", "BBB"), ("BB-", "BB"), ("Ba1", "BB+"),
+                       ("B3", "B-"), ("Caa1", "CCC"), ("CCC+", "CCC"), ("AA+", "AA"), ("Aaa", "AAA"),
+                       ("Ba2/BB", "BB"), ("bb", None), ("XYZ", None)):
+        assert rating_table_label(typed) == row, f"Rating {typed!r} should map to {row!r}!"
+    cod_rated = cost_of_debt_from_rating("Baa2", 0.05, {"BBB": 0.0111})
+    assert abs(cod_rated[0] - 0.0611) < 1e-12 and cod_rated[1] == "BBB", "Actual-rating cost of debt mismatch!"
+    print("Actual ratings map to the spread table (Baa2 -> BBB: 5% + 1.11% = 6.11%)")
 
     print("\n✓ All self-tests passed. The math is internally consistent.")
