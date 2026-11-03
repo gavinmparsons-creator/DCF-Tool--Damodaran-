@@ -2616,8 +2616,181 @@ def run_financial_firm_valuation(summary, facts, fx_currency, fx_rate, book_equi
     summary["terminal_growth"] = terminal_growth
 
 
+def run_project_valuation(summary, facts, fx_currency, fx_rate, financials, book_equity, shares_out,
+                          share_price, market_cap, total_debt, cash, coe, risk_free_rate,
+                          marginal_tax_rate, damodaran, mix):
+    """
+    --project: a company whose value is a mine or plant not yet producing
+    (see model.project_cash_flow_paths). The operating story — when it
+    produces, how much, at what margin, what's left to spend — comes from
+    the company's technical report or guidance; EDGAR supplies the balance
+    sheet, the current burn, the NOL pool and the share count. Prints the
+    year-by-year build, the value with and without the failure overlay,
+    and the full-output revenue the price implies.
+    """
+    print(f"\n{'='*60}")
+    print("  Project valuation (pre-production, Damodaran-style project NPV)")
+    print(f"{'='*60}")
+    print("  The value is the project: what the finished mine or plant will earn, minus what it")
+    print("  still costs to build and run the company until then. These inputs come from the")
+    print("  technical report (feasibility study) or company guidance — not from the filings.")
+
+    capex_ttm = financials.get("capex", {}).get("value") or 0.0
+    ppe, _ppe_tag, _ppe_fy, ppe_unit = freshest_instant(facts, ["PropertyPlantAndEquipmentNet"])
+    if ppe is not None and fx_currency and ppe_unit == fx_currency:
+        ppe *= fx_rate
+    print(f"\n  For reference: capex last 12 months ${capex_ttm:,.0f}; plant & equipment on the books "
+          + (f"${ppe:,.0f}." if ppe is not None else "n/a."))
+    build_years = int(prompt_number("  Years until first production (0 if it starts this year): "))
+    remaining_capex = prompt_number("  Capex still to spend before production, in dollars "
+                                    "(the company's share, net of grants already received): ")
+
+    cash_flow, cash_flow_note = reported_cash_flow(facts, capex_ttm, fx_currency, fx_rate)
+    default_overhead = max(0.0, -(cash_flow + capex_ttm)) if cash_flow is not None else None
+    if default_overhead is not None:
+        print(f"  Current cash burn before capex: ${default_overhead:,.0f}  "
+              f"({cash_flow_note}, capex added back)")
+    overhead = prompt_number("  Annual corporate costs until production, in dollars" +
+                             (f" (Enter for ${default_overhead:,.0f}): " if default_overhead is not None else ": "),
+                             default=default_overhead)
+
+    full_revenue = prompt_number("  Annual revenue at full output, in dollars (capacity x expected price): ")
+    industry_margin, margin_date = industry_average(damodaran, "margins", mix)
+    if industry_margin is not None:
+        print(f"  Industry operating margin: {industry_margin:.1%}  ({' + '.join(n for n, _ in mix)}; "
+              f"Damodaran, {margin_date}) — for reference")
+    margin = prompt_number("  Operating margin at full output, after depreciation, as a percent: ") / 100
+    ramp_years = int(prompt_number("  Years to ramp up to full output (Enter for 1 = full output in the "
+                                   "first production year): ", default=1))
+    life_input = input("  Production life in years for a mine with a set reserve (Enter for a plant that runs\n"
+                       "  indefinitely): ").strip()
+    life_years = int(parse_number(life_input)) if life_input else None
+    share = prompt_number("  Company's share of the project as a percent (Enter for 100): ", default=100) / 100
+
+    # Cost of capital: market-value weights; debt at the actual rating's
+    # spread when there is one, otherwise priced like equity — a
+    # pre-production company's synthetic rating is always D.
+    print(f"\n  Cost of equity: {coe:.2%}")
+    cost_of_debt = coe
+    rating = None
+    while True:
+        typed = input("  Actual bond rating, if it has one (Enter to price its debt at the cost of equity): ").strip()
+        if not typed:
+            break
+        rated, label, _spread = model.cost_of_debt_from_rating(
+            typed, risk_free_rate, (damodaran.get("ratings") or {}).get("spreads"))
+        if rated is not None:
+            cost_of_debt, rating = rated, typed
+            print(f"  {typed} -> {label}: cost of debt {cost_of_debt:.2%}")
+            break
+        print("    Couldn't read that as a rating (AAA down to D, S&P or Moody's).")
+    cod_input = input(f"  Press Enter for a {cost_of_debt:.2%} cost of debt, or type the actual rate on its "
+                      "loans (e.g. 5 for 5%): ").strip()
+    if cod_input:
+        cost_of_debt = parse_number(cod_input) / 100
+    computed = model.wacc(market_cap, total_debt, coe, cost_of_debt, marginal_tax_rate)
+    discount_rate = prompt_number(f"  Cost of capital (Enter for {computed:.2%}): ", default=computed * 100) / 100
+
+    nol_raw, nol_tag, _nol_fy, nol_unit = get_latest_annual_value(
+        facts, ["DeferredTaxAssetsOperatingLossCarryforwards", "OperatingLossCarryforwards"])
+    nol_balance = nol_raw * fx_rate if nol_raw is not None and nol_unit == fx_currency else (nol_raw or 0.0)
+    print(f"  NOL carryforward on record: ${nol_balance:,.0f}" + (f" (tag: {nol_tag})" if nol_tag else ""))
+
+    def build(full_rev, rate):
+        paths = model.project_cash_flow_paths(full_rev * share, margin, build_years, ramp_years,
+                                              remaining_capex, 0.0, life_years)
+        paths["ebit"] = [e - (overhead if t < build_years else 0.0) for t, e in enumerate(paths["ebit"])]
+        taxes = model.nol_tax_rate_path(paths["ebit"], nol_balance, marginal_tax_rate)
+        return paths, model.project_value(paths, taxes, rate, marginal_tax_rate, perpetual=life_years is None), taxes
+
+    paths, result, taxes = build(full_revenue, discount_rate)
+    print(f"\n  {'Yr':>3} {'Revenue':>16} {'EBIT':>16} {'Tax%':>6} {'Capex':>16} {'FCFF':>16}")
+    n_years = len(paths["revenue"])
+    shown = sorted(set(range(min(n_years, build_years + ramp_years + 2))) | {n_years - 1})  # a 40-year mine: build, ramp, last
+    for i, t in enumerate(shown):
+        if i and t != shown[i - 1] + 1:
+            print(f"  {'...':>3}  (years {shown[i - 1] + 2}-{t} the same as year {shown[i - 1] + 1})")
+        print(f"  {t + 1:>3} {paths['revenue'][t]:>16,.0f} {paths['ebit'][t]:>16,.0f} {taxes[t]:>5.0%} "
+              f"{paths['capex'][t]:>16,.0f} {result['fcff'][t]:>16,.0f}")
+    if life_years is None:
+        print(f"  Then full output forever: terminal value = NOPAT / {discount_rate:.2%} "
+              "(new investment earns its cost of capital).")
+
+    minority, _m_tag, _m_fy, m_unit = freshest_instant(facts, ["MinorityInterest", "NoncontrollingInterests"])
+    minority = (minority or 0.0) * (fx_rate if fx_currency and m_unit == fx_currency else 1.0)
+    if share < 1.0:
+        print(f"  Note: debt and cash below are the consolidated figures; if some belong to the project")
+        print(f"  partner (a joint-venture loan, say), the company's share of them is what counts.")
+    if share < 1.0 and minority:
+        print(f"  Partner's share is already left out ({1 - share:.0%}), so its book minority interest "
+              f"(${minority:,.0f}) isn't subtracted again.")
+        minority = 0.0
+    dilution, dil_label, _dil_source = latest_reported_dilution(facts)
+    shares = shares_out + (dilution or 0.0)
+    equity = result["value"] - total_debt - minority + cash
+    print(f"\n  PV of build years + production:  ${result['pv_explicit']:>18,.0f}")
+    if life_years is None:
+        print(f"  + PV of terminal value:          ${result['pv_terminal']:>18,.0f}")
+    print(f"  - Debt:                          ${total_debt:>18,.0f}")
+    if minority:
+        print(f"  - Minority interest (book):      ${minority:>18,.0f}")
+    print(f"  + Cash and investments:          ${cash:>18,.0f}")
+    print(f"  = Equity value:                  ${equity:>18,.0f}   over {shares:,.0f} shares"
+          + (f" (incl. {dilution:,.0f} dilutive, {dil_label})" if dilution else ""))
+    print("  (Remaining capex is in the cash flows, so the shares it will take to fund it aren't")
+    print("  counted again — new shares sold at fair value don't change value per share.)")
+
+    if rating and model.failure_probability_from_rating(rating) is not None:
+        default_fail = model.failure_probability_from_rating(rating)
+        print(f"  10-year default probability for {rating}: {default_fail:.2%}  ({model.RATING_DEFAULT_SOURCE})")
+        probability_of_failure = prompt_number(f"  Probability the project never reaches production, as a percent "
+                                               f"(Enter for {default_fail:.1%}): ", default=default_fail * 100) / 100
+    else:
+        print("  No published base rate fits a single project's construction risk — this one is judgment")
+        print("  (financing secured? permits? technology proven at scale?).")
+        probability_of_failure = prompt_number("  Probability the project never reaches production, as a "
+                                               "percent (e.g. 30 for 30%): ") / 100
+    haircut_input = input("  Liquidation haircut on book equity (e.g. 50 for 50%; Enter for 50%): ").strip()
+    liquidation_haircut = parse_number(haircut_input) / 100 if haircut_input else 0.50
+
+    print(f"\n{'='*60}")
+    print(f"  VALUATION RANGE — {summary['company']} ({summary['ticker']}), project NPV")
+    print(f"{'='*60}")
+    if share_price:
+        print(f"  Current market price: ${share_price:,.2f}\n")
+    values = {}
+    for label, rate in (("low", discount_rate + 0.01), ("base", discount_rate), ("high", discount_rate - 0.01)):
+        going = (build(full_revenue, rate)[1]["value"] - total_debt - minority + cash) / shares
+        blended, liquidation = model.failure_adjusted_value_per_share(
+            going, probability_of_failure, book_equity, shares, liquidation_haircut)
+        values[label] = blended
+        print(f"  {label.upper():5s}: ${blended:>10,.2f} per share   (cost of capital {rate:.2%}; going-concern "
+              f"${going:,.2f}, liquidation ${liquidation:,.2f}, P(fail)={probability_of_failure:.0%})")
+
+    # Full-output revenue the price implies, everything else held — the
+    # usual crux (capacity x price). Value rises with revenue; bisect.
+    if share_price:
+        def per_share(full_rev):
+            going = (build(full_rev, discount_rate)[1]["value"] - total_debt - minority + cash) / shares
+            return model.failure_adjusted_value_per_share(going, probability_of_failure, book_equity,
+                                                          shares, liquidation_haircut)[0]
+        lo, hi = 0.0, max(full_revenue, 1.0) * 1000
+        if per_share(lo) <= share_price <= per_share(hi):
+            for _ in range(100):
+                mid = (lo + hi) / 2
+                lo, hi = (mid, hi) if per_share(mid) < share_price else (lo, mid)
+            print(f"\n  The price (${share_price:,.2f}) implies full-output revenue of ${lo:,.0f} a year"
+                  + (f" ({lo / full_revenue:.1f}x the ${full_revenue:,.0f} assumed)," if full_revenue else ","))
+            print(f"  at the same {margin:.0%} margin, timing and {probability_of_failure:.0%} failure probability.")
+        elif per_share(lo) > share_price:
+            print(f"\n  The price (${share_price:,.2f}) is below the value even with no revenue at all.")
+
+    summary["project"] = dict(values, project_value=result["value"], equity_value=equity,
+                              probability_of_failure=probability_of_failure, discount_rate=discount_rate)
+
+
 def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, reit=False,
-                       cyclical=False, financial=False):
+                       cyclical=False, financial=False, project=False):
     """
     Interactive valuation of one company. Prints the full build, and
     returns a summary dict of the key inputs and results (beta, ERP, WACC,
@@ -2683,10 +2856,11 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
 
     # ---- Assemble DCF inputs ----
     def operating_metric(key, label, **kwargs):
-        """get_metric_value, except under --financial: the equity model
-        doesn't use firm-level inputs, so a missing or stale one isn't
-        asked for (Synchrony has no revenue tag — that would block the run)."""
-        if financial:
+        """get_metric_value, except under --financial or --project: neither
+        uses the firm's current operating figures, so a missing or stale
+        one isn't asked for (Synchrony has no revenue tag; a mine under
+        construction has no revenue at all)."""
+        if financial or project:
             value = financials[key]["value"] or 0.0
             return (value, False) if kwargs.get("return_override_flag") else value
         return get_metric_value(financials, key, label, stale, **kwargs)
@@ -2715,8 +2889,8 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
                     period_label = f"TTM to {pretax_info['as_of']}"
         if fx_currency and latest_rebuilt["unit"] == fx_currency:
             latest_rebuilt = {**latest_rebuilt, "val": latest_rebuilt["val"] * fx_rate}
-        if financial:
-            ebit = latest_rebuilt["val"]  # unused: --financial values the equity, not the firm
+        if financial or project:
+            ebit = latest_rebuilt["val"]  # unused: these modes don't value today's operations
         else:
             print("  'EBIT / operating income' isn't tagged — this company's income statement has no")
             print(f"  operating-income line. Rebuilt as pretax income + interest expense ({period_label}): "
@@ -2739,7 +2913,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     # distortion gets fixed before falling back to margin normalization.
     rd_result = None
     latest_rd_raw, _rd_tag, _rd_fy, _rd_unit = get_latest_annual_value(facts, METRIC_TAGS["rd_expense"])
-    if latest_rd_raw is not None and not financial:
+    if latest_rd_raw is not None and not financial and not project:
         # Convert ONLY if THIS metric's own unit is actually fx_currency —
         # a filer can convenience-translate most figures to USD while
         # leaving a specific disclosure (e.g. a notes-only line item) in
@@ -2800,7 +2974,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     is_trough = (full_cycle is not None and reported_margin is not None and full_cycle["mean"] > 0
                  and reported_margin < 0.5 * full_cycle["mean"])
     cycle_choice = None
-    if not financial and (ebit < 0 or is_trough or (cyclical and full_cycle is not None)):
+    if not financial and not project and (ebit < 0 or is_trough or (cyclical and full_cycle is not None)):
         reason = ("latest FY is negative" if ebit < 0 else
                   "latest FY looks like a cyclical trough" if is_trough else "--cyclical")
         print(f"\n{'='*60}")
@@ -3265,6 +3439,11 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         run_financial_firm_valuation(summary, facts, fx_currency, fx_rate, book_equity, shares_out,
                                      share_price, coe, damodaran, roe_mix or mix, risk_free_rate,
                                      beta_source, erp_source)
+        return summary
+    if project:
+        run_project_valuation(summary, facts, fx_currency, fx_rate, financials, book_equity, shares_out,
+                              share_price, market_cap, total_debt, cash, coe, risk_free_rate,
+                              marginal_tax_rate, damodaran, mix)
         return summary
 
     # ---- Reinvestment-rate-derived growth (Damodaran fundamental growth) ----
@@ -4467,6 +4646,12 @@ if __name__ == "__main__":
              "whose debt, EBIT and reinvestment don't mean anything for a financial firm.",
     )
     parser.add_argument(
+        "--project", action="store_true",
+        help="Pre-production mode (a mine or plant still being built — Lithium Americas, USA Rare "
+             "Earth): values the project from the technical report's timing, capex, output, "
+             "price and margin, with a failure probability, instead of a DCF of today's operations.",
+    )
+    parser.add_argument(
         "--cyclical", action="store_true",
         help="Cyclical mode: always normalizes EBIT to the company's average margin over "
              "a full cycle (up to 10 years, loss years included), with a year-by-year "
@@ -4477,4 +4662,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     run_full_valuation(args.ticker, args.stage, args.narrative, args.biotech, args.reit, args.cyclical,
-                       args.financial)
+                       args.financial, args.project)
