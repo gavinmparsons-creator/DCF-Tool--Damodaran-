@@ -4,7 +4,9 @@ WACC/DCF valuation, Damodaran-style.
 
 USAGE (from Terminal):
     python3 valuation.py AAPL
-    python3 valuation.py MSFT --fmp-key YOUR_FMP_KEY_HERE
+    python3 valuation.py ARM --narrative              (story-based "Ginzu" DCF)
+    python3 valuation.py SCHW --financial             (banks / brokers: excess return model)
+    python3 valuation.py LAC --project                (pre-production mine or plant)
     python3 valuation.py VKTX --biotech --narrative   (drug pipeline rNPV + biotech defaults)
     python3 valuation.py O --reit                     (FFO/AFFO dividend model + NAV)
     python3 valuation.py DOW --cyclical --narrative   (normalize to the 10-yr cycle margin)
@@ -29,7 +31,9 @@ WHY A RANGE, NOT ONE NUMBER:
 
 NOTES:
     - No API key is needed for EDGAR. SEC requires a User-Agent header
-      identifying you — edit YOUR_NAME / YOUR_EMAIL below before running.
+      identifying you (a name and email): the first run asks for it and
+      saves it to data/sec_contact.txt, which stays on your machine. Or set
+      the DCF_SEC_CONTACT environment variable ("Jane Doe jane@example.com").
     - This is a starting model (WACC/FCFF DCF only). APV and DGM can be
       added later the same way — see compute_dcf() for where to extend.
     - EDGAR XBRL tag names are NOT perfectly standardized across
@@ -75,10 +79,6 @@ try:
 except ImportError:
     YFINANCE_AVAILABLE = False
 
-# ---- EDIT THESE TWO LINES BEFORE RUNNING ----
-YOUR_NAME = "Gavin Parsons"
-YOUR_EMAIL = "you@example.com"
-# ----------------------------------------------
 
 # ---- OPTIONAL: paste your Financial Modeling Prep key here ----
 # Get a free key at financialmodelingprep.com. If left blank, or if the
@@ -87,7 +87,36 @@ YOUR_EMAIL = "you@example.com"
 FMP_API_KEY = ""
 # -----------------------------------------------------------------
 
-USER_AGENT = f"{YOUR_NAME} {YOUR_EMAIL}"
+SEC_CONTACT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "sec_contact.txt")
+_sec_user_agent = None
+
+
+def sec_user_agent():
+    """The "Name email" SEC asks every EDGAR request to identify itself
+    with — from DCF_SEC_CONTACT, else data/sec_contact.txt (kept out of
+    git), else asked once and saved there. Kept out of the code so the
+    repository can be public without anyone's email in it."""
+    global _sec_user_agent
+    if _sec_user_agent:
+        return _sec_user_agent
+    contact = os.environ.get("DCF_SEC_CONTACT", "").strip()
+    if not contact:
+        try:
+            with open(SEC_CONTACT_PATH) as f:
+                contact = f.read().strip()
+        except OSError:
+            pass
+    if not contact:
+        print("  SEC asks every EDGAR request to say who's making it (a name and an email).")
+        contact = input("  Your name and email (e.g. Jane Doe jane@example.com; saved locally, asked once): ").strip()
+        try:
+            os.makedirs(os.path.dirname(SEC_CONTACT_PATH), exist_ok=True)
+            with open(SEC_CONTACT_PATH, "w") as f:
+                f.write(contact + "\n")
+        except OSError:
+            pass
+    _sec_user_agent = contact
+    return contact
 
 EDGAR_TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json"
 EDGAR_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
@@ -320,7 +349,7 @@ FX_RATE_URL = "https://api.frankfurter.dev/v1/latest?from={currency}&to=USD"
 
 def fetch_json(url):
     """Fetch a URL and parse it as JSON, sending the required SEC User-Agent header."""
-    req = Request(url, headers={"User-Agent": USER_AGENT})
+    req = Request(url, headers={"User-Agent": sec_user_agent()})
     try:
         with urlopen(req) as resp:
             return json.loads(resp.read().decode("utf-8"))
@@ -328,7 +357,7 @@ def fetch_json(url):
         print(f"ERROR fetching {url}: HTTP {e.code}")
         if e.code == 403:
             print("This usually means the User-Agent header is missing or malformed.")
-            print("Edit YOUR_NAME and YOUR_EMAIL at the top of this script.")
+            print(f"Check the name and email in {SEC_CONTACT_PATH} (or DCF_SEC_CONTACT).")
         sys.exit(1)
 
 
@@ -1216,7 +1245,7 @@ def get_market_data(ticker):
     if FMP_API_KEY:
         url = FMP_PROFILE_URL.format(ticker=ticker.upper(), key=FMP_API_KEY)
         try:
-            req = Request(url, headers={"User-Agent": USER_AGENT})
+            req = Request(url, headers={"User-Agent": sec_user_agent()})
             with urlopen(req) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             if data and isinstance(data, list) and len(data) > 0:
@@ -1483,7 +1512,7 @@ def get_implied_volatility(ticker, target_days=30):
 def fetch_json_or_none(url):
     """Like fetch_json, but returns None on failure instead of exiting —
     used for the FX lookup, which has a manual-entry fallback."""
-    req = Request(url, headers={"User-Agent": USER_AGENT})
+    req = Request(url, headers={"User-Agent": sec_user_agent()})
     try:
         with urlopen(req) as resp:
             return json.loads(resp.read().decode("utf-8"))
@@ -2068,7 +2097,7 @@ def adr_ratio_candidates(filing_url):
     filing, as {ratio: times mentioned}. Large filings (BP's 20-F is
     ~30 MB) take a few seconds, which is why the answer gets saved."""
     try:
-        with urlopen(Request(filing_url, headers={"User-Agent": USER_AGENT}), timeout=90) as resp:
+        with urlopen(Request(filing_url, headers={"User-Agent": sec_user_agent()}), timeout=90) as resp:
             page = resp.read().decode("utf-8", errors="replace")
     except Exception:
         return {}
@@ -2100,7 +2129,7 @@ def get_market_shares(ticker):
     if FMP_API_KEY:
         try:
             with urlopen(Request(FMP_PROFILE_URL.format(ticker=ticker.upper(), key=FMP_API_KEY),
-                                 headers={"User-Agent": USER_AGENT}), timeout=20) as resp:
+                                 headers={"User-Agent": sec_user_agent()}), timeout=20) as resp:
                 profile = json.loads(resp.read().decode("utf-8"))[0]
             if profile.get("mktCap") and profile.get("price"):
                 return float(profile["mktCap"]) / float(profile["price"])

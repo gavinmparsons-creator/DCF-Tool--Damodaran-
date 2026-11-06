@@ -1,7 +1,8 @@
 __pycache__/
 *.pyc
 .DS_Store
-data/damodaran_cache.json
+# Your own saved choices, cache and SEC contact (name + email) stay local
+data/
 benchmarks/logs/
 benchmarks/results/
 research/data/
