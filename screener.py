@@ -237,12 +237,33 @@ def run_warnings(text, needs, ticker=None, price=None):
     return "; ".join(sorted(warnings)), market_cap
 
 
+def _private_choice_files():
+    """Point this worker at its own copy of your saved industry / ADR /
+    country choices: it reads what you've decided (a report agrees with
+    your runs) but never writes your files, which you may be using in a
+    terminal at the same moment."""
+    if getattr(_private_choice_files, "done", False):
+        return
+    work = tempfile.mkdtemp()
+    for attr in ("INDUSTRY_MAP_PATH", "ADR_RATIO_PATH", "COUNTRY_MAP_PATH"):
+        source = getattr(valuation, attr)
+        target = os.path.join(work, os.path.basename(source))
+        try:
+            with open(source) as f, open(target, "w") as g:
+                g.write(f.read())
+        except OSError:
+            pass
+        setattr(valuation, attr, target)
+    _private_choice_files.done = True
+
+
 def insight_one(ticker, flags, needs, log_dir):
     """value_one plus the narrative model's view (report.py's capture): the
     record value — worth per share if the company keeps its own 5-year
     revenue growth at today's margin — and the starting growth the price
     needs at today's margin, against that record."""
     import report  # imports this module; loaded by the time a worker calls this
+    _private_choice_files()
     row = {"ticker": ticker}
     text = ""
     try:
