@@ -58,8 +58,10 @@ def main():
     has_record = "record_to_price" in rows[0] and any(r.get("record_to_price") for r in rows)
     key = "record_to_price" if has_record else "value_to_price"
     valued = [r for r in rows if num(r.get(key)) is not None]
+    # A margin over 90% means the revenue or EBIT figure is wrong, not that
+    # the business is that good (Verra Mobility read 114%).
     ideas = [r for r in valued if clean(r) and 1.2 <= num(r[key]) < 10
-             and (not has_record or (num(r.get("margin_now")) or 0) > 0)]
+             and (not has_record or 0 < (num(r.get("margin_now")) or 0) <= 0.9)]
     ideas.sort(key=lambda r: num(r[key]), reverse=True)
 
     lines = [f"# Digest: {name}", "",
