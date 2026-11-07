@@ -353,18 +353,48 @@ PHASE_DEFAULT_YEARS_TO_LAUNCH = {
 FX_RATE_URL = "https://api.frankfurter.dev/v1/latest?from={currency}&to=USD"
 
 
+_SEC_LAST_REQUEST = [0.0]
+_JSON_CACHE = {}  # url -> parsed JSON: the ticker map for the whole run, and the last few companies' facts
+
+
 def fetch_json(url):
-    """Fetch a URL and parse it as JSON, sending the required SEC User-Agent header."""
-    req = Request(url, headers={"User-Agent": sec_user_agent()})
-    try:
-        with urlopen(req) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except HTTPError as e:
-        print(f"ERROR fetching {url}: HTTP {e.code}")
-        if e.code == 403:
-            print("This usually means the User-Agent header is missing or malformed.")
-            print(f"Check the name and email in {SEC_CONTACT_PATH} (or DCF_SEC_CONTACT).")
-        sys.exit(1)
+    """Fetch a URL and parse it as JSON, sending the required SEC User-Agent
+    header. Paced to SEC's 10-requests-a-second limit and retried with
+    backoff when SEC answers 429 (too many requests) or a 5xx: a screen
+    running several companies at once got rate-limited on 480 of 700.
+    The ticker map and the last few companies' facts are kept in memory,
+    so a company's filings are downloaded once per run."""
+    if url in _JSON_CACHE:
+        return _JSON_CACHE[url]
+    for attempt in range(6):
+        wait = 0.12 - (time.time() - _SEC_LAST_REQUEST[0])
+        if wait > 0:
+            time.sleep(wait)
+        _SEC_LAST_REQUEST[0] = time.time()
+        try:
+            with urlopen(Request(url, headers={"User-Agent": sec_user_agent()}), timeout=60) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            break
+        except HTTPError as e:
+            if e.code in (429, 500, 502, 503, 504) and attempt < 5:
+                time.sleep(2 * 2 ** attempt)  # 2, 4, 8, 16, 32 seconds
+                continue
+            print(f"ERROR fetching {url}: HTTP {e.code}")
+            if e.code == 403:
+                print("This usually means the User-Agent header is missing or malformed.")
+                print(f"Check the name and email in {SEC_CONTACT_PATH} (or DCF_SEC_CONTACT).")
+            sys.exit(1)
+        except OSError as e:  # a timeout or dropped connection
+            if attempt < 5:
+                time.sleep(2 * 2 ** attempt)
+                continue
+            print(f"ERROR fetching {url}: {e}")
+            sys.exit(1)
+    if url != EDGAR_TICKER_MAP_URL:
+        for old in [k for k in _JSON_CACHE if k != EDGAR_TICKER_MAP_URL][:-2]:
+            del _JSON_CACHE[old]  # keep memory small across a long screen
+    _JSON_CACHE[url] = data
+    return data
 
 
 def get_cik_for_ticker(ticker):
