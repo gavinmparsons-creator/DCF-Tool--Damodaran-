@@ -4923,14 +4923,30 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         industry_s2c, s2c_date = industry_average(damodaran, "s2c", mix)
         print("  Sales-to-capital ratio: how much new revenue $1 of new capital buys (2.0 ="
               " $1 buys $2 of revenue).")
+        # The company's own ratio is distorted when much of its capital is
+        # acquisition goodwill (Global Payments: 0.25) or capitalized R&D
+        # (ARM: 0.50); when neither is, a ratio well above the industry's is
+        # the business model itself (Costco: 13.0 vs retail's 3.5, since
+        # members and suppliers fund its growth) and is the better default.
+        goodwill_val = (freshest_instant(facts, ["Goodwill"])[0] or 0.0) * (fx_rate if fx_currency else 1.0)
+        intangibles_val = (freshest_instant(facts, ["IntangibleAssetsNetExcludingGoodwill"])[0] or 0.0) \
+            * (fx_rate if fx_currency else 1.0)
+        research_val = rd_result["research_asset"] if rd_result else 0.0
+        distorted_share = ((goodwill_val + intangibles_val + research_val) / invested_capital
+                           if invested_capital and invested_capital > 0 else 1.0)
         print(f"  This company's own trailing ratio (revenue / invested capital): " +
               (f"{trailing_s2c:.2f}" if trailing_s2c else "n/a") +
-              " — skewed by past acquisitions and capitalized R&D.")
+              f" — {distorted_share:.0%} of its invested capital is goodwill, intangibles or capitalized R&D.")
+        own_is_clean = (trailing_s2c and industry_s2c and trailing_s2c > industry_s2c and 0 <= distorted_share < 0.25)
         if industry_s2c:
             print(f"  Industry: {industry_s2c:.2f}  ({' + '.join(n for n, _ in mix)}; Damodaran, {s2c_date};"
                   " goodwill in,")
             print("  R&D not capitalized — a little generous for an R&D-heavy company here).")
             default_s2c, default_label = industry_s2c, f"the industry's {industry_s2c:.2f}"
+            if own_is_clean:
+                print("  Its own ratio is above the industry's and its capital is mostly operating assets, so its")
+                print("  own is the default: the business needs less capital to grow than its industry does.")
+                default_s2c, default_label = trailing_s2c, f"its own {trailing_s2c:.2f}"
         elif trailing_s2c and trailing_s2c > 0:
             default_s2c, default_label = trailing_s2c, f"the trailing {trailing_s2c:.2f}"
         else:
