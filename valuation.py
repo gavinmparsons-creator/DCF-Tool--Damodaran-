@@ -769,7 +769,7 @@ def trailing_revenue_cagr(facts_json, years=5):
     data points are available, or the oldest value isn't positive
     (a CAGR over a loss-to-something swing isn't a meaningful number).
     """
-    series = get_annual_series(facts_json, METRIC_TAGS["revenue"], years)
+    series = annual_revenue_series(facts_json, years)
     if len(series) < 2 or series[0]["val"] <= 0:
         return None, None
     oldest, newest = series[0], series[-1]
@@ -847,6 +847,22 @@ def pretax_from_continuing_ops_series(facts_json, years=5):
     return series
 
 
+def annual_revenue_series(facts_json, years=10):
+    """Revenue by fiscal year, oldest first, like get_annual_series — but
+    when several revenue tags report the same year, the largest wins: total
+    revenue is never smaller than a piece of it, and a filer can tag a small
+    sub-line under a generic tag (MGP Ingredients' 'Revenues' held $13-23M a
+    year in 2013-2018 beside $318-376M of real sales, which made its cycle
+    margin 70%)."""
+    by_end = {}
+    for recipe in METRIC_TAGS["revenue"]:
+        for e in get_annual_series(facts_json, [recipe], years + 10):
+            best = by_end.get(e["end"])
+            if best is None or (e["unit"] == best["unit"] and e["val"] > best["val"]):
+                by_end[e["end"]] = e
+    return [by_end[end] for end in sorted(by_end)][-years:]
+
+
 def cycle_margin_history(facts_json, years=10):
     """
     Up to `years` of matched (revenue, EBIT) pairs, one per fiscal year,
@@ -863,7 +879,7 @@ def cycle_margin_history(facts_json, years=10):
     needed). Returns a list of dicts: fiscal_year, revenue, ebit, rebuilt.
     """
     pull = years + 5  # extra headroom: not every year has both figures
-    revenue = {e["end"]: e for e in get_annual_series(facts_json, METRIC_TAGS["revenue"], pull)}
+    revenue = {e["end"]: e for e in annual_revenue_series(facts_json, pull)}
     operating = {e["end"]: e for e in get_annual_series(facts_json, METRIC_TAGS["operating_income"], pull)}
     ebit = {e["end"]: e for e in pretax_plus_interest_series(facts_json, pull)}
     ebit.update(operating)
