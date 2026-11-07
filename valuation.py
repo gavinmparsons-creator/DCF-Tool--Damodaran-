@@ -1650,6 +1650,38 @@ def print_financials_report(company_name, financials):
     return missing, stale
 
 
+def print_quarterly_annualization_warning(financials):
+    """
+    Loud, repeated warning for a brand-new-IPO filer with no 10-K/20-F
+    yet, where apply_quarterly_only had to extrapolate a partial-year
+    10-Q into a full year (e.g. Generate Biomedicines, listed Feb 2026:
+    a 6-month YTD figure x 12/6). print_financials_report already notes
+    this once, quietly, at the very top of a run — easy to scroll past
+    by the time a value-per-share number shows up pages later. This
+    prints the same warning again, loudly, immediately after EVERY
+    final valuation output in the run, so it's still visible right next
+    to the number it undermines. A no-op (prints nothing) once a real
+    annual filing exists and apply_latest_quarter's TTM-from-4-quarters
+    path is used instead — summing four REPORTED quarters isn't the
+    same approximation as extrapolating one partial one.
+    """
+    affected = {m: info["annualized_months"] for m, info in financials.items() if info.get("annualized_months")}
+    if not affected:
+        return
+    detail = ", ".join(f"{m} ({mo:.0f}mo of data)" for m, mo in affected.items())
+    bar = "!" * 64
+    print(f"\n  {bar}")
+    print("  !!  DATA-QUALITY WARNING: NO FULL FISCAL YEAR EXISTS YET")
+    print(f"  !!  {detail}")
+    print("  !!  was stretched from a partial-year 10-Q to a full year by simple")
+    print("  !!  extrapolation (x 12/n_months) — not a real trailing twelve months.")
+    print("  !!  Seasonality, ramp effects, and one-off items in that window are")
+    print("  !!  compounded into every number above. Treat this as a rough")
+    print("  !!  directional read, not a trustworthy valuation, until a real")
+    print("  !!  annual filing (or four consecutive 10-Qs) exists.")
+    print(f"  {bar}")
+
+
 # ---------------------------------------------------------------------
 # DAMODARAN DATA: industry betas and the current implied equity risk
 # premium, pulled from his site so every run uses the same consistent,
@@ -4021,6 +4053,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         print(f"  NAV: ${nav['nav']:,.0f}")
         print(f"  NAV per share: ${nav['nav_per_share']:,.2f}   vs current price ${share_price:,.2f}" +
               (f"  ({premium:+.0%} {'premium' if premium >= 0 else 'discount'} to NAV)" if premium is not None else ""))
+        print_quarterly_annualization_warning(financials)
 
     # ---- Equity bridge (Damodaran): the DCF values the OPERATING business;
     # getting from there to value per share means subtracting every other
@@ -4201,6 +4234,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     if qual_adjustment:
         print(f"\n  ({qual_adjustment:+.0%} qualitative adjustment applied"
               + (f": {qual_note}" if qual_note else "") + ")")
+    print_quarterly_annualization_warning(financials)
 
     # ---- Sanity checks (Damodaran): diagnostics only — they compare what
     # the valuation implies against arithmetic and published industry
@@ -4292,6 +4326,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
             print(f"  EV ({multiple:g}x revenue): ${revenue * multiple:,.0f}   "
                   f"Equity value: ${rev_equity_value:,.0f}   "
                   f"Per share: ${rev_value_per_share:,.2f}")
+            print_quarterly_annualization_warning(financials)
 
     # ---- Drug pipeline (--biotech): a clinical-stage biotech's value is
     # a handful of drug candidates, each approved-or-not, so neither DCF
@@ -4345,8 +4380,28 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
             ramp_years = int(parse_number(ramp_input)) if ramp_input else 5
             excl_input = input("    Years of exclusivity after launch (Enter for 10): ").strip()
             exclusivity_years = int(parse_number(excl_input)) if excl_input else 10
-            cost_input = input("    Remaining development + launch cost in dollars (Enter for 0): ").strip()
-            dev_cost = parse_number(cost_input) if cost_input else 0.0
+            # Cost by stage, each weighted by the chance of reaching it — a
+            # Phase 1 drug's Phase 3 is only run about 15% of the time.
+            stage_labels = {"preclinical": "preclinical work", "phase1": "Phase 1", "phase2": "Phase 2",
+                            "phase3": "Phase 3", "launch": "filing + launch"}
+            stages = model.remaining_stages(phase)
+            if not stages:
+                cost_input = input("    Remaining cost in dollars, charged now (Enter for 0): ").strip()
+                dev_cost = parse_number(cost_input) if cost_input else 0.0
+            else:
+                stage_costs = {}
+                for i, stage in enumerate(stages):
+                    when = ("certain" if i == 0 and stage != "launch" else
+                            "only if approved" if stage == "launch" else
+                            f"only if {stage_labels[stages[i - 1]]} succeeds")
+                    label = (f"Remaining development cost in {stage_labels[stage]}" if i == 0 and stage != "launch"
+                             else f"Cost of {stage_labels[stage]}")
+                    text = input(f"    {label}, in dollars ({when}; Enter for 0): ").strip()
+                    stage_costs[stage] = parse_number(text) if text else 0.0
+                dev_cost, rows = model.expected_development_cost(stage_costs, phase, prob_approval)
+                if any(cost for _, cost, _ in rows):
+                    print("    Expected cost: " + " + ".join(
+                        f"{stage_labels[st]} ${c:,.0f} x {r:.0%}" for st, c, r in rows if c) + f" = ${dev_cost:,.0f}")
             drugs.append({
                 "name": name, "phase": phase,
                 "result": model.drug_rnpv(peak_sales, years_to_launch, ramp_years, exclusivity_years,
@@ -4383,6 +4438,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
             print("  better information: well above rNPV means the drug's value rests on that")
             print("  flexibility; well below means it's clearly worth developing now, and the")
             print("  option model's 1/n cost of delay is penalizing the wait it assumes.")
+            print_quarterly_annualization_warning(financials)
 
     # ---- Narrative DCF (Damodaran's actual "Ginzu"-style build):
     # revenue, margin, and reinvestment are forecast as three SEPARATE
@@ -4564,6 +4620,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         summary["narrative"] = {label: narrative_range[label]["value_per_share"] for label in ("low", "base", "high")}
         if narrative_range["ordering_warning"]:
             print(f"\n  ⚠ {narrative_range['ordering_warning']}")
+        print_quarterly_annualization_warning(financials)
 
         # ---- Narrative sanity checks (Damodaran): is the story possible?
         # Diagnostics only — nothing here changes a value. ----
@@ -4699,6 +4756,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
             blended_values["low"], blended_values["base"], blended_values["high"])
         if blend_ordering_warning:
             print(f"\n  ⚠ {blend_ordering_warning}")
+        print_quarterly_annualization_warning(financials)
 
     print("\n  This is a mechanical DCF estimate based on the last 10-K only, plus")
     print("  whatever WACC / terminal growth / qualitative overrides you entered")
