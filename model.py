@@ -1328,6 +1328,50 @@ PHASE_APPROVAL_PROBABILITY = {
 }
 
 
+# Development stages a drug still has to pay for, in order, from each
+# current phase: the clinical phases through Phase 3, then filing/launch.
+DEVELOPMENT_STAGES = ["preclinical", "phase1", "phase2", "phase3", "launch"]
+
+
+def remaining_stages(phase):
+    """The stages still to be paid for from `phase`: the current one, every
+    later clinical phase, and launch ("filed" has only launch left;
+    "approved" has none)."""
+    if phase == "approved":
+        return []
+    if phase == "filed":
+        return ["launch"]
+    return DEVELOPMENT_STAGES[DEVELOPMENT_STAGES.index(phase):]
+
+
+def expected_development_cost(stage_costs, phase, probability_of_approval=None):
+    """
+    Remaining development cost weighted by the chance of ever spending it.
+    The current stage is certain; a later phase is only run if every phase
+    before it succeeds, with probability P(approval from now) / P(approval
+    from that phase) — the phase-transition rates behind
+    PHASE_APPROVAL_PROBABILITY. Launch is only paid if approved
+    (probability_of_approval, default the table's). Treating it all as
+    certain made early programs look like losses: a Phase 1 drug whose
+    Phase 3 runs only ~15% of the time was charged for it in full.
+
+    stage_costs: {stage: cost} for remaining_stages(phase) (missing = 0).
+    Returns (expected_cost, [(stage, cost, probability_reached), ...]).
+    """
+    p_now = PHASE_APPROVAL_PROBABILITY[phase]
+    p_approval = p_now if probability_of_approval is None else probability_of_approval
+    rows = []
+    for i, stage in enumerate(remaining_stages(phase)):
+        if stage == "launch":
+            reach = p_approval
+        elif i == 0:
+            reach = 1.0
+        else:
+            reach = p_now / PHASE_APPROVAL_PROBABILITY[stage]
+        rows.append((stage, stage_costs.get(stage, 0.0), reach))
+    return sum(cost * reach for _, cost, reach in rows), rows
+
+
 def drug_commercial_cash_flows(peak_sales, years_to_launch, ramp_years, exclusivity_years,
                                 operating_margin, tax_rate):
     """
@@ -2379,6 +2423,18 @@ if __name__ == "__main__":
     # An already-approved drug's remaining cost is charged today, undiscounted.
     approved = drug_rnpv(100, 0, 1, 1, 0.50, 0.0, 0.10, 10, 1.0)
     assert abs(approved["rnpv"] - (50 / 1.1 - 10)) < 1e-9, "Approved-drug rNPV mismatch!"
+
+    # Expected development cost, Phase 1 drug: Phase 1 $30 (certain), Phase 2
+    # $100 x 52.3% (0.079 / 0.151), Phase 3 $370 x 15.1% (0.079 / 0.524),
+    # launch $200 x 7.9% -> 30 + 52.32 + 55.78 + 15.80 = 153.90
+    exp_cost, rows = expected_development_cost(
+        {"phase1": 30, "phase2": 100, "phase3": 370, "launch": 200}, "phase1")
+    hand = 30 + 100 * 0.079 / 0.151 + 370 * 0.079 / 0.524 + 200 * 0.079
+    print(f"Expected development cost (Phase 1 drug): {exp_cost:.4f}  (expected {hand:.4f})")
+    assert abs(exp_cost - hand) < 1e-9, "Expected development cost mismatch!"
+    assert [r[0] for r in rows] == ["phase1", "phase2", "phase3", "launch"], "Remaining stages mismatch!"
+    assert expected_development_cost({"launch": 50}, "filed", 0.9)[0] == 45.0, "Filed drug: launch x P(approval)!"
+    assert remaining_stages("approved") == [], "An approved drug has no development stages left!"
 
     # patent_option_value: textbook Black-Scholes check with the dividend
     # yield forced to zero — S=100, K=100, t=1, sigma=20%, r=5% -> 10.4506.
