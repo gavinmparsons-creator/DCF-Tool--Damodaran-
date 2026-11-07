@@ -2995,8 +2995,9 @@ def run_financial_firm_valuation(summary, facts, fx_currency, fx_rate, financial
             latest_roe = ttm_ni / common_bv
             print(f"  ROE from the 10-Qs ({label}): {latest_roe:.1%} on today's common equity")
     current_roe = prompt_number(
-        "  Current ROE as a percent " + (f"(Enter for the latest, {latest_roe:.1%}): " if rows else ": "),
-        default=latest_roe * 100 if rows else None) / 100
+        "  Current ROE as a percent " + (f"(Enter for the latest, {latest_roe:.1%}): " if latest_roe is not None
+                                         else ": "),
+        default=latest_roe * 100 if latest_roe is not None else None) / 100
 
     recent = rows[-3:]
     ni_sum = sum(ni for _, ni, _, _ in recent)
