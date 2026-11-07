@@ -3599,6 +3599,17 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
                                        default=domestic_market)
             financials["shares_outstanding"]["value"] = shares_out
             share_scale = 10.0 ** round(math.log10(shares_out / filed_count))
+        elif domestic_market and filed_count / domestic_market < 0.67:
+            # Far fewer filed shares than the market counts: usually a second
+            # share class the cover page lists separately — an Up-C's Class B
+            # (Smith Douglas: 9.2M Class A of ~51M economic shares) or a
+            # founder class. Value per share has to spread over all of them.
+            print(f"\n  ⚠ Filed share count {filed_count:,.0f} (tag: {financials['shares_outstanding']['tag']}) is "
+                  f"only {filed_count / domestic_market:.0%} of the market's {domestic_market:,.0f} — usually a")
+            print("  second share class (an Up-C's Class B, a founder class) that also owns the business.")
+            shares_out = prompt_number("  Press Enter to use the market's count, or type the share count: ",
+                                       default=domestic_market)
+            financials["shares_outstanding"]["value"] = shares_out
     if adr_counts_disagree and market_shares:
         filed_count = financials["shares_outstanding"]["value"]
         print(f"  Filed ordinary shares: {filed_count:,.0f}   Market ADS count x ratio: "
