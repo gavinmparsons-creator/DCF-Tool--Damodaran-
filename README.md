@@ -37,6 +37,25 @@ python3 valuation.py ARM --narrative
 
 Modes combine, e.g. `--narrative --cyclical` or `--biotech --narrative`.
 
+## Beyond one valuation
+
+Three tools build on `valuation.py` for finding and tracking ideas:
+
+| Tool | What it does |
+|---|---|
+| `report.py TICKER` | A one-command company report. It runs the tool once on defaults, picking bank, REIT, cyclical or standard mode from the SEC industry code, and writes `reports/<TICKER>_<date>.md` with four sections:<br>1. **The record:** revenue, growth, cycle margins, return on capital.<br>2. **What the price implies:** the growth it needs at today's, cycle-average and industry margins, and the margin it needs at the company's own growth.<br>3. **A growth × margin grid** of values per share, including what a lasting competitive edge is worth.<br>4. **Every data warning.** |
+| `screener.py SECTOR` | Values every listed company in a sector non-interactively and ranks them, with each run's data warnings. Sectors:<br>• `banks`: excess return model.<br>• `builders`: homebuilders and land developers.<br>• `smallcap`: every operating company from $300M to $2B.<br>For builders and small caps it also reports a **record value** (what the company is worth if it keeps its own 5-year growth at today's margin) and the growth the price needs against the growth it delivered. `--answer "PROMPT=VALUE"` overrides a default across the whole screen. |
+| `journal.py` | A decision journal. Record every buy, pass or watch with the price, your thesis and the model's value, then score each against simply owning the S&P 500 (SPY) over the same days. A pass scores when the stock then lagged. |
+
+```bash
+python3 report.py NPB
+python3 screener.py smallcap --workers 6
+python3 journal.py add NPB watch "Mortgage-warehouse lender at 0.9x book; brokered funding is the risk"
+python3 journal.py show
+```
+
+Screens, reports and the journal stay on your machine (git-ignored).
+
 ## Sample output
 
 ```
@@ -69,7 +88,7 @@ On the first run it asks for a name and email. SEC requires every EDGAR request 
 
 - `valuation.py`: data pulls (EDGAR, Yahoo, Treasury, Damodaran's datasets), the interactive build, and the modes.
 - `model.py`: the valuation math only, with hand-worked self-tests (`python3 model.py`).
-- `benchmarks/`: a regression suite. Eleven companies, each chosen to exercise a different part of the tool (Apple, Dow, Walmart, Coca-Cola, Netflix, Viking, Realty Income, Alibaba, TSMC, Snowflake, Schwab). They're valued against recorded data, so only a code change can move a number:
+- `benchmarks/`: a regression suite. Twelve companies, each chosen to exercise a different part of the tool (Apple, Dow, Walmart, Coca-Cola, Netflix, Viking, Realty Income, Alibaba, TSMC, Snowflake, Schwab, Generate Biomedicines). They're valued against recorded data, so only a code change can move a number:
 
   ```bash
   python3 benchmarks/run_benchmarks.py
