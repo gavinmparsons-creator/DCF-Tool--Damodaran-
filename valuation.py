@@ -366,7 +366,8 @@ def fetch_json(url):
     so a company's filings are downloaded once per run."""
     if url in _JSON_CACHE:
         return _JSON_CACHE[url]
-    for attempt in range(6):
+    attempts = 9
+    for attempt in range(attempts):
         wait = 0.12 - (time.time() - _SEC_LAST_REQUEST[0])
         if wait > 0:
             time.sleep(wait)
@@ -376,8 +377,12 @@ def fetch_json(url):
                 data = json.loads(resp.read().decode("utf-8"))
             break
         except HTTPError as e:
-            if e.code in (429, 500, 502, 503, 504) and attempt < 5:
-                time.sleep(2 * 2 ** attempt)  # 2, 4, 8, 16, 32 seconds
+            if e.code in (429, 500, 502, 503, 504) and attempt < attempts - 1:
+                # SEC blocks a client for about 10 minutes after a burst: back off
+                # 2s, 4s, ... 256s (about 8.5 minutes in all) before giving up.
+                pause = 2 * 2 ** attempt
+                print(f"  (SEC answered HTTP {e.code}; waiting {pause}s and retrying)", file=sys.stderr)
+                time.sleep(pause)
                 continue
             print(f"ERROR fetching {url}: HTTP {e.code}")
             if e.code == 403:

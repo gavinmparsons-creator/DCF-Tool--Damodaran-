@@ -91,12 +91,14 @@ def run_capture(ticker, flags, answer_for):
         captured["nol"] = (nol_balance, marginal_rate)
         return real_nol(ebit_path, nol_balance, marginal_rate)
 
+    real_input = builtins.input
     builtins.input = fake_input
     model.run_valuation_range_narrative, model.nol_tax_rate_path = capture_range, capture_nol
     try:
         with contextlib.redirect_stdout(out):
             summary = valuation.run_full_valuation(ticker, None, **flags)
     finally:
+        builtins.input = real_input
         model.run_valuation_range_narrative, model.nol_tax_rate_path = real_range, real_nol
     return summary, out.getvalue(), captured
 
