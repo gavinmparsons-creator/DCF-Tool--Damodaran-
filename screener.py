@@ -44,14 +44,15 @@ SECTORS = {
     "banks": {"sic": [6021, 6022, 6029, 6035, 6036], "flags": {"financial": True},
               "about": "national and state commercial banks, savings institutions (--financial)",
               "needs": {"book_equity", "shares_outstanding"}},
-    "builders": {"sic": [1531, 6552, 1520], "flags": {"cyclical": True},
+    "builders": {"sic": [1531, 6552, 1520], "flags": {"cyclical": True, "insight": True},
                  "about": "homebuilders, land developers and residential contractors (Lennar files as one) "
                           "(--cyclical)",
                  "needs": {"revenue", "operating_income", "cash", "shares_outstanding", "book_equity"}},
     # Small caps: every listed operating company from $300M to $2B, on the
     # standard model. Financials, REITs and blank-check shells (SIC 6000-6999)
     # are left out — they need bank or REIT mode.
-    "smallcap": {"universe": "cap", "min_cap": 3e8, "max_cap": 2e9, "exclude_sic": (6000, 6999), "flags": {},
+    "smallcap": {"universe": "cap", "min_cap": 3e8, "max_cap": 2e9, "exclude_sic": (6000, 6999),
+                 "flags": {"insight": True},
                  "about": "listed operating companies from $300M to $2B, excluding financials and REITs",
                  "needs": {"revenue", "operating_income", "cash", "shares_outstanding", "book_equity"}},
 }
@@ -159,7 +160,10 @@ def cap_universe(spec):
             in_range.append((ticker, cik, name))
     found = []
     lo, hi = spec.get("exclude_sic", (0, -1))
-    for ticker, cik, name in in_range:
+    print(f"  {len(in_range)} in the market-cap range; looking up industry codes...", flush=True)
+    for i, (ticker, cik, name) in enumerate(in_range, start=1):
+        if i % 200 == 0:
+            print(f"    {i}/{len(in_range)}", flush=True)
         try:
             sic = int(json.loads(_get(EDGAR_SUBMISSIONS_URL.format(cik=cik))).get("sic") or 0)
         except Exception:
@@ -217,11 +221,68 @@ def run_warnings(text, needs, ticker=None, price=None):
     return "; ".join(sorted(warnings)), market_cap
 
 
+def insight_one(ticker, flags, needs, log_dir):
+    """value_one plus the narrative model's view (report.py's capture): the
+    record value — worth per share if the company keeps its own 5-year
+    revenue growth at today's margin — and the starting growth the price
+    needs at today's margin, against that record."""
+    import report  # imports this module; loaded by the time a worker calls this
+    row = {"ticker": ticker}
+    text = ""
+    try:
+        cik, _ = valuation.get_cik_for_ticker(ticker)
+        facts = valuation.fetch_json(valuation.EDGAR_FACTS_URL.format(cik=cik))
+        cagr, _span = valuation.trailing_revenue_cagr(facts)
+        growth = min(max(cagr if cagr is not None else 0.0, -0.05), 0.40)
+
+        def answer_for(prompt, printed):
+            if "Initial revenue growth" in prompt:
+                return f"{growth * 100:.2f}"
+            if "Early-stage cost of capital" in prompt:
+                found = re.findall(r"Mature WACC \(computed above\): ([\d.]+)%", printed)
+                return found[-1] if found else ""
+            if "Target (mature) operating margin" in prompt:
+                found = re.findall(r"Current operating margin: (-?[\d.]+)%", printed)
+                return found[-1] if found else ""
+            if "Probability of failure as a percent" in prompt:
+                return "10"
+            return ""
+
+        summary, text, captured = report.run_capture(ticker, dict(flags, narrative=True), answer_for)
+        values = summary.get("dcf") or {}
+        row.update(low=values.get("low"), base=values.get("base"), high=values.get("high"),
+                   wacc=summary.get("wacc"), hist_growth=cagr)
+        price = summary.get("share_price")
+        if "range" in captured and price:
+            story = report.Story(captured)
+            row["margin_now"] = story.margin_now
+            row["record_value"] = story.value(growth, story.margin_now)
+            if story.margin_now > 0:
+                row["implied_growth"] = story.solve(price, "growth", story.margin_now, -0.50, 2.0)
+    except BaseException as e:
+        row["error"] = f"{type(e).__name__}: {e}"[:160]
+    price = re.search(r"(?:Current market price|share price)=?:? ?\$([\d,]+\.?\d*)", text)
+    row["price"] = float(price.group(1).replace(",", "")) if price else None
+    row["warnings"], row["market_cap"] = run_warnings(text, needs, ticker, row["price"])
+    if row.get("base") is not None and row.get("price"):
+        row["value_to_price"] = row["base"] / row["price"]
+    if row.get("record_value") is not None and row.get("price"):
+        row["record_to_price"] = row["record_value"] / row["price"]
+    if row.get("implied_growth") is not None and row.get("hist_growth") is not None:
+        row["expectations_gap"] = row["implied_growth"] - row["hist_growth"]
+    os.makedirs(log_dir, exist_ok=True)
+    with open(os.path.join(log_dir, f"{ticker}.log"), "w") as f:
+        f.write(text)
+    return row
+
+
 def value_one(args):
     """Run valuation.py on one ticker with every default accepted. Returns a
     result row (dict). Runs in a worker process: its own saved-choice
     files, so parallel runs can't overwrite each other's industry picks."""
     ticker, flags, needs, log_dir, answers = args
+    if flags.get("insight"):
+        return insight_one(ticker, {k: v for k, v in flags.items() if k != "insight"}, needs, log_dir)
     work = tempfile.mkdtemp()
     valuation.INDUSTRY_MAP_PATH = os.path.join(work, "industry_map.json")
     valuation.ADR_RATIO_PATH = os.path.join(work, "adr_ratios.json")
@@ -280,7 +341,17 @@ def main():
     spec = SECTORS[args.sector]
     print(f"Finding {args.sector}: {spec['about']}...")
     if spec.get("universe") == "cap":
-        universe = cap_universe(spec)
+        # The universe takes ~15 minutes to build (SEC's rate limit on the
+        # industry-code lookups), so it's saved for the day and reused.
+        cache = os.path.join(SCREEN_DIR, f"universe_{args.sector}_{date.today().isoformat()}.json")
+        try:
+            with open(cache) as f:
+                universe = [tuple(row) for row in json.load(f)]
+        except (OSError, ValueError):
+            universe = cap_universe(spec)
+            os.makedirs(SCREEN_DIR, exist_ok=True)
+            with open(cache, "w") as f:
+                json.dump(universe, f)
         print(f"  {len(universe)} listed companies from ${spec['min_cap']:,.0f} to ${spec['max_cap']:,.0f}")
     else:
         universe = sector_universe(args.sector)
@@ -309,25 +380,37 @@ def main():
         for i, row in enumerate(pool.imap_unordered(value_one, jobs), start=1):
             row["name"], row["sic"] = names[row["ticker"]]
             rows.append(row)
-            status = (f"{row['value_to_price']:.2f}x" if row.get("value_to_price") else
+            status = (f"{row['record_to_price']:.2f}x record" if row.get("record_to_price") is not None else
+                      f"{row['value_to_price']:.2f}x" if row.get("value_to_price") else
                       row.get("error", "no value")[:60])
             print(f"  [{i}/{len(universe)}] {row['ticker']:<6} {status}", flush=True)
 
-    rows.sort(key=lambda r: r.get("value_to_price") or -1, reverse=True)
+    rank_by = "record_to_price" if spec["flags"].get("insight") else "value_to_price"
+    rows.sort(key=lambda r: r.get(rank_by) if r.get(rank_by) is not None else -1e9, reverse=True)
     os.makedirs(SCREEN_DIR, exist_ok=True)
     path = os.path.join(SCREEN_DIR, f"{args.sector}_{date.today().isoformat()}.csv")
-    fields = ["ticker", "name", "sic", "market_cap", "price", "low", "base", "high", "value_to_price", "price_implies",
+    fields = ["ticker", "name", "sic", "market_cap", "price", "low", "base", "high", "value_to_price",
+              "record_value", "record_to_price", "hist_growth", "implied_growth", "expectations_gap", "margin_now",
+              "price_implies",
               "roe", "stable_roe", "cost_of_equity", "wacc", "book_equity", "warnings", "error"]
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
     print(f"\nRanked results: {path}")
-    print(f"{'Ticker':<7}{'Price':>10}{'Base value':>12}{'Value/price':>13}  Warnings")
-    for r in rows[:25]:
-        if r.get("value_to_price"):
-            print(f"{r['ticker']:<7}{r['price']:>10,.2f}{r['base']:>12,.2f}{r['value_to_price']:>12.2f}x  "
-                  f"{r['warnings']}")
+    if rank_by == "record_to_price":
+        pct = lambda x: "" if x is None else f"{x:.1%}"
+        print(f"{'Ticker':<7}{'Price':>10}{'Record value':>14}{'x price':>9}{'Grew':>8}{'Price needs':>13}  Warnings")
+        for r in rows[:25]:
+            if r.get("record_to_price") is not None:
+                print(f"{r['ticker']:<7}{r['price']:>10,.2f}{r['record_value']:>14,.2f}{r['record_to_price']:>8.2f}x"
+                      f"{pct(r.get('hist_growth')):>8}{pct(r.get('implied_growth')):>13}  {r['warnings']}")
+    else:
+        print(f"{'Ticker':<7}{'Price':>10}{'Base value':>12}{'Value/price':>13}  Warnings")
+        for r in rows[:25]:
+            if r.get("value_to_price"):
+                print(f"{r['ticker']:<7}{r['price']:>10,.2f}{r['base']:>12,.2f}{r['value_to_price']:>12.2f}x  "
+                      f"{r['warnings']}")
     print("\nDefaults only — an idea list, not a verdict. Read a company's log before trusting its row.")
 
 

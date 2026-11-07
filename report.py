@@ -273,10 +273,11 @@ def company_report(ticker):
         for label, margin in margins:
             if margin <= 0:
                 continue  # growth alone can't help a business that loses money on each sale
-            g = story.solve(price, "growth", margin, -0.10, 1.0)
+            g = story.solve(price, "growth", margin, -0.50, 2.0)
             lines.append(f"- At **{label} margin ({pct(margin)})**, the price needs starting revenue growth of "
-                         + (f"**{pct(g)}**" if g is not None else "**more than 100%** — no plausible growth gets there"
-                            if story.value(1.0, margin) < price else "**less than -10%** — the price is below even a shrinking business")
+                         + (f"**{pct(g)}**" + (" — the price assumes the business shrinks" if g < 0 else "")
+                            if g is not None else "**more than 200%** — no plausible growth gets there"
+                            if story.value(2.0, margin) < price else "**below -50%** — the price is below even a collapsing business")
                          + f" (fading to {pct(story.terminal_growth)} by year 10); its own record is {pct(cagr)}.")
         m = story.solve(price, "margin", start_growth, -0.2, 0.9)
         capped = " — its record, capped at 40%" if cagr is not None and cagr > 0.40 else (
