@@ -775,6 +775,43 @@ def pretax_plus_interest_series(facts_json, years=5):
     return series
 
 
+# After-tax income from continuing operations, NCI-inclusive — used to
+# rebuild pretax income (this + income tax expense) for a filer with no
+# "before income taxes" subtotal tagged at all. Found live on Simon
+# Property Group (SPG): checked whether this was a REIT-wide gap first
+# (it isn't — Public Storage, Prologis, Realty Income, VICI, and Equinix
+# all tag the usual pretax subtotal fine) — it's SPG-specific, but the
+# reason this particular rebuild is a SAFE substitute (rather than just
+# another approximation) IS REIT-specific: a REIT's corporate income tax
+# is near-zero by construction (it must distribute ~90%+ of taxable
+# income to keep that status), so after-tax and pretax income are
+# already close to the same number for a REIT. For an ordinary taxable
+# company missing this tag, don't add it here — subtracting the wrong
+# amount of tax would be a real error, not a rounding one.
+CONTINUING_OPS_INCOME_TAGS = [
+    "IncomeLossFromContinuingOperationsIncludingPortionAttributableToNoncontrollingInterest",
+    "ProfitLoss",  # SPG itself switched to this tag after FY2016 for the same line
+    "NetIncomeLoss",
+]
+
+
+def pretax_from_continuing_ops_series(facts_json, years=5):
+    """
+    Pretax income rebuilt as (after-tax income from continuing
+    operations, NCI-inclusive) + income tax expense — the mirror image
+    of pretax_plus_interest_series's EBIT rebuild, for a filer with no
+    pretax-income tag at all. Only years with both figures are kept.
+    """
+    income = get_annual_series(facts_json, CONTINUING_OPS_INCOME_TAGS, years)
+    tax_by_end = {e["end"]: e for e in get_annual_series(facts_json, METRIC_TAGS["income_tax_expense"], years)}
+    series = []
+    for inc in income:
+        t = tax_by_end.get(inc["end"])
+        if t is not None:
+            series.append({**inc, "val": inc["val"] + t["val"]})
+    return series
+
+
 def cycle_margin_history(facts_json, years=10):
     """
     Up to `years` of matched (revenue, EBIT) pairs, one per fiscal year,
@@ -3380,7 +3417,21 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
                 else:
                     cycle_choice = None
 
-    pretax_income = operating_metric("pretax_income", "pretax income")
+    pretax_rebuilt = pretax_from_continuing_ops_series(facts, years=1)
+    if financials["pretax_income"]["value"] is None and pretax_rebuilt:
+        latest_pretax_rebuilt = pretax_rebuilt[-1]
+        if fx_currency and latest_pretax_rebuilt["unit"] == fx_currency:
+            latest_pretax_rebuilt = {**latest_pretax_rebuilt, "val": latest_pretax_rebuilt["val"] * fx_rate}
+        if financial or project:
+            pretax_income = latest_pretax_rebuilt["val"]
+        else:
+            print("  'pretax income' isn't tagged at all — some REITs skip a before-tax subtotal since")
+            print(f"  they owe little or no corporate tax. Rebuilt as income from continuing ops + tax "
+                  f"expense (FY{latest_pretax_rebuilt['fiscal_year']}): ${latest_pretax_rebuilt['val']:,.0f}")
+            pretax_income = prompt_number("  Press Enter to use it, or type a corrected pretax income "
+                                          "(in dollars): ", default=latest_pretax_rebuilt["val"])
+    else:
+        pretax_income = operating_metric("pretax_income", "pretax income")
     tax_expense = operating_metric("income_tax_expense", "income tax expense")
 
     # CapEx and D&A are naturally lumpy (a big equipment buy, an
@@ -3692,7 +3743,11 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     else:
         print("  Damodaran's industry betas couldn't be loaded (no connection and no cache).")
 
-    if industry_beta is not None and regression_beta is None:
+    if industry_beta is not None and regression_beta is None and financial:
+        answer = input(f"  Press Enter to use the industry beta {industry_beta:.2f}, or type a beta to use as is: "
+                       ).strip().lower()
+        answer = "" if answer == "r" else answer
+    elif industry_beta is not None and regression_beta is None:
         answer = input(f"  Press Enter to use the industry beta {industry_beta:.2f}, or type an UNLEVERED beta\n"
                        "  to relever instead: ").strip().lower()
         answer = "" if answer == "r" else answer
