@@ -1007,6 +1007,33 @@ def trailing_twelve_months(facts_json, tag, unit, annual_end, annual_val):
     return annual_val + current["val"] - prior_ytd["val"], current["end"]
 
 
+def quarterly_spike(facts_json, tag, unit):
+    """
+    (latest, typical, end_date) when the latest tagged three-month quarter of
+    `tag` is far out of line with the four before it — more than three times
+    their median and at least twice the median's size above it, or a
+    profit/loss flip worth more than three median quarters; else None. Needs
+    at least three earlier quarters within the last ~15 months.
+    """
+    quarters = {}
+    for e in _all_taxonomy_tags(facts_json).get(tag, {}).get("units", {}).get(unit, []):
+        if e.get("start") and e.get("end") and 80 < _days(e["start"], e["end"]) < 100:
+            quarters[e["end"]] = e["val"]
+    ends = sorted(quarters)
+    if len(ends) < 4:
+        return None
+    latest_end = ends[-1]
+    prior = [quarters[e] for e in ends[-5:-1] if 0 < _days(e, latest_end) <= 460]
+    if len(prior) < 3:
+        return None
+    typical = sorted(prior)[len(prior) // 2] if len(prior) % 2 else sum(sorted(prior)[len(prior) // 2 - 1:len(prior) // 2 + 1]) / 2
+    latest = quarters[latest_end]
+    gap = latest - typical
+    if abs(gap) <= 3 * max(abs(typical), 1.0) or abs(gap) < 2 * abs(typical):
+        return None
+    return latest, typical, latest_end
+
+
 def _period_label(start, end):
     days = _days(start, end)
     return (f"quarter ending {end}" if days < 120 else
@@ -3304,6 +3331,27 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
                                  default=latest_rebuilt["val"])
     else:
         ebit = operating_metric("operating_income", "EBIT / operating income")
+
+    # ---- One-time quarter in the TTM (Damodaran: value normal earnings,
+    # not a one-off). A gain on selling a business or a licensing windfall
+    # lands in one quarter and the trailing twelve months take all of it:
+    # Kennametal's September 2026 quarter showed $379M of operating income
+    # against a typical $40-80M; Nurix $559M after years of quarterly
+    # losses. The default swaps that quarter for the company's typical one. ----
+    oi_info = financials["operating_income"]
+    if not (financial or project) and oi_info.get("ttm") and oi_info.get("tag") and "+" not in oi_info["tag"]:
+        spike = quarterly_spike(facts, oi_info["tag"], oi_info["unit"])
+        if spike:
+            latest, typical, end = (x * (fx_rate if fx_currency and oi_info["unit"] == fx_currency else 1)
+                                    if isinstance(x, (int, float)) else x for x in spike)
+            adjusted = ebit - latest + typical
+            print(f"\n  ⚠ The quarter ending {end} had operating income of ${latest:,.0f}, far from its typical")
+            print(f"  ${typical:,.0f} a quarter (median of the four before) — usually a one-time item")
+            print("  (a gain on a sale, a licensing payment, an impairment). Check the 10-Q.")
+            keep = input(f"  Press Enter to use TTM with that quarter at its typical level (${adjusted:,.0f}),\n"
+                         f"  or type k to keep the reported TTM (${ebit:,.0f}): ").strip().lower()
+            if keep != "k":
+                ebit = adjusted
 
     # ---- R&D capitalization (Damodaran-style) ----
     # Accounting expenses R&D as incurred, but for an R&D-driven business
