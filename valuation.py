@@ -1127,6 +1127,17 @@ def apply_latest_quarter(facts_json, financials):
         annual_end = max(periods)
         if metric in TTM_FLOW_METRICS:
             ttm, as_of = trailing_twelve_months(facts_json, tag, info["unit"], annual_end, info["value"])
+            if ttm is None:
+                # The quarters can sit under a different tag than the annual
+                # figure (AppLovin: FY2025 "Revenues", 10-Qs under
+                # RevenueFromContractWithCustomer...) — left alone, revenue
+                # stayed a year old while operating income moved to TTM (a
+                # 108% margin). Same fiscal year-end, so the quarters bridge.
+                for other in METRIC_TAGS[metric]:
+                    if isinstance(other, str) and other != tag and annual_end in _recipe_annual_entries(all_tags, other):
+                        ttm, as_of = trailing_twelve_months(facts_json, other, info["unit"], annual_end, info["value"])
+                        if ttm is not None:
+                            break
             if ttm is not None:
                 info.update(value=ttm, as_of=as_of, ttm=True)
         elif metric in LATEST_QUARTER_INSTANT_METRICS:
@@ -2586,7 +2597,7 @@ COMMON_DIVIDEND_TAGS = ["PaymentsOfDividendsCommonStock", "DividendsCommonStockC
 BUYBACK_TAGS = ["PaymentsForRepurchaseOfCommonStock"]
 
 
-def run_financial_firm_valuation(summary, facts, fx_currency, fx_rate, book_equity, shares_out,
+def run_financial_firm_valuation(summary, facts, fx_currency, fx_rate, financials, book_equity, shares_out,
                                  share_price, coe, damodaran, mix, risk_free_rate, beta_source, erp_source):
     """
     --financial: Damodaran's excess return model for a bank or brokerage,
@@ -2737,6 +2748,7 @@ def run_financial_firm_valuation(summary, facts, fx_currency, fx_rate, book_equi
                 lo, hi = (mid, hi) if value_at(mid) < share_price else (lo, mid)
             print(f"  The price (${share_price:,.2f}) implies a stable ROE of {lo:.1%} "
                   f"(vs. {stable_roe:.1%} assumed, cost of equity {coe:.2%}).")
+    print_quarterly_annualization_warning(financials)
 
     summary["excess_return"] = {label: value_range[label]["value_per_share"] for label in ("low", "base", "high")}
     summary["excess_return"].update(current_roe=current_roe, stable_roe=stable_roe, payout=current_payout,
@@ -2904,6 +2916,7 @@ def run_project_valuation(summary, facts, fx_currency, fx_rate, financials, book
         values[label] = blended
         print(f"  {label.upper():5s}: ${blended:>10,.2f} per share   (cost of capital {rate:.2%}; going-concern "
               f"${going:,.2f}, liquidation ${liquidation:,.2f}, P(fail)={probability_of_failure:.0%})")
+    print_quarterly_annualization_warning(financials)
 
     # Full-output revenue the price implies, everything else held — the
     # usual crux (capacity x price). Value rises with revenue; bisect.
@@ -3574,7 +3587,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     summary.update(beta=beta, risk_free_rate=risk_free_rate, erp=erp, cost_of_equity=coe)
 
     if financial:
-        run_financial_firm_valuation(summary, facts, fx_currency, fx_rate, book_equity, shares_out,
+        run_financial_firm_valuation(summary, facts, fx_currency, fx_rate, financials, book_equity, shares_out,
                                      share_price, coe, damodaran, roe_mix or mix, risk_free_rate,
                                      beta_source, erp_source)
         return summary
