@@ -2224,8 +2224,11 @@ ADR_RATIO_PATH = os.path.join(DATA_DIR, "adr_ratios.json")
 FOREIGN_ANNUAL_FORMS = ("20-F", "40-F")
 _NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
                  "nine": 9, "ten": 10, "twelve": 12, "fifteen": 15, "twenty": 20}
+# The keyword is a whole word ("this leads to a final dividend of €2.70 per
+# ordinary share" read as 2.7 ordinary shares per ADS for ASML), and a
+# number right after a currency sign is a price, not a share count.
 _ADR_RATIO_PATTERN = re.compile(
-    r"(?i)(?:ADSs?|American Depositary Shares?|depositary shares?)\b[^.;]{0,140}?\b"
+    r"(?i)\b(?:ADSs?|American Depositary Shares?|depositary shares?)\b[^.;]{0,140}?(?<![€$£¥])(?<![€$£¥] )\b"
     r"(one|two|three|four|five|six|seven|eight|nine|ten|twelve|fifteen|twenty|\d+(?:\.\d+)?)"
     r"\s*(?:\(\d+(?:\.\d+)?\)\s*)?(?:[\w\-]+\s+){0,3}?(?:ordinary|common)\s+shares?")
 
