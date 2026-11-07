@@ -210,6 +210,7 @@ METRIC_TAGS = {
     "cash": [
         "CashAndCashEquivalentsAtCarryingValue",
         "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+        "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsIncludingDisposalGroupAndDiscontinuedOperations",  # e.g. Hovnanian
         "CashAndCashEquivalents",  # ifrs-full
     ],
     "shares_outstanding": [
@@ -250,6 +251,11 @@ METRIC_TAGS = {
         "InterestExpenseNonoperating",
         "InterestExpenseOperating",  # e.g. Coherent, Cloudflare
         "FinanceCosts",  # ifrs-full
+        # Homebuilders capitalize interest into their houses and expense it
+        # through cost of sales, so the income statement shows little or no
+        # interest expense (D.R. Horton, Meritage) — this is the interest
+        # actually charged that year, the financing cost to add back to EBIT.
+        "RealEstateInventoryCapitalizedInterestCostsCostOfSales1",
         # Last-resort fallbacks: a signed NET interest income/(expense)
         # figure, for filers (e.g. Charter) who stopped tagging gross
         # interest expense entirely. See NET_INTEREST_TAGS below — the
@@ -2567,6 +2573,209 @@ def industry_average(damodaran, piece, mix):
     return model.weighted_unlevered_beta([(data["values"][n], w) for n, w in mix]), data["updated"]
 
 
+# Two real companies per Damodaran industry group with a GENUINELY
+# sustained (multi-decade, not just this year) above-industry margin or
+# ROIC, and the actual mechanism behind it — printed next to the "needs
+# a lasting edge" / "needs a durable competitive advantage" sanity-check
+# warnings below so that flag is a concrete comparison to argue against
+# ("is this company's edge really like Costco's?") instead of a number
+# to glance past. Deliberately NOT exhaustive across all ~94 Damodaran
+# groups: many (commodity/cyclical industries especially — Steel, Coal,
+# Shipbuilding, Trucking) don't have a real sustained-moat exemplar at
+# all, and guessing one just to fill the table would be worse than
+# leaving it blank. Covers the industries actually run this session
+# plus other unambiguous, widely-covered cases; add more as they come
+# up rather than padding this out preemptively. No bank/money-center
+# entry on purpose: exemplar_financial_snapshot's EBIT fallback (pretax
+# income + interest expense, for filers with no OperatingIncomeLoss tag)
+# assumes interest expense is a financing cost to add back, which is
+# backwards for a bank or custody bank — interest expense IS their cost
+# of revenue, so the rebuild returns a meaningless 90%+ "margin" (caught
+# live on JPM, BAC, State Street). Banks don't have an operating-margin
+# concept this framework can represent at all; that's what --financial
+# mode's excess-return-on-equity model is for instead. Tickers only — the
+# actual margin/ROIC is pulled fresh from EDGAR each run (see
+# exemplar_financial_snapshot), not hardcoded, so it can't go stale.
+INDUSTRY_EXEMPLARS = {
+    "Semiconductor": [
+        ("TSM", "foundry process-node scale rivals can't match"),
+        ("NVDA", "CUDA software ecosystem lock-in"),
+    ],
+    "Semiconductor Equip": [
+        ("ASML", "sole-source EUV lithography monopoly"),
+        ("KLAC", "process-control tooling entrenched in fab workflows"),
+    ],
+    "Software (System & Application)": [
+        ("MSFT", "enterprise switching costs across the Office/Azure stack"),
+        ("ADBE", "Creative/Document Cloud subscription lock-in"),
+    ],
+    "Software (Internet)": [
+        ("GOOGL", "search distribution + data network effects"),
+        ("META", "social-graph network effects"),
+    ],
+    "Restaurant/Dining": [
+        ("MCD", "owned real estate + franchise royalty model"),
+        ("CMG", "vertical integration + kitchen throughput"),
+    ],
+    "Retail (General)": [
+        ("COST", "membership-fee float + bulk buying power"),
+        ("WMT", "logistics density + scale buying power"),
+    ],
+    "Insurance (General)": [
+        ("CB", "specialty underwriting discipline"),
+        ("MKL", "niche underwriting + investment compounding"),
+    ],
+    "Insurance (Prop/Cas.)": [
+        ("PGR", "telematics data + pricing-segmentation edge"),
+        ("TRV", "underwriting discipline at scale"),
+    ],
+    "Drugs (Biotechnology)": [
+        ("REGN", "VelocImmune antibody-discovery platform"),
+        ("VRTX", "first-in-class franchise + regulatory exclusivity"),
+    ],
+    "Drugs (Pharmaceutical)": [
+        ("LLY", "GLP-1 franchise + patent exclusivity"),
+        ("JNJ", "diversified pipeline + commercial scale"),
+    ],
+    "R.E.I.T.": [
+        ("PSA", "self-storage density in supply-constrained markets"),
+        ("PLD", "logistics real estate scale + tenant switching costs"),
+    ],
+    "Retail (REITs)": [
+        ("SPG", "dominant mall portfolio, hard to replicate"),
+        ("O", "triple-net scale + tenant diversification"),
+    ],
+    "Beverage (Soft)": [
+        ("KO", "global bottling network + brand"),
+        ("PEP", "snack + beverage portfolio distribution scale"),
+    ],
+    "Household Products": [
+        ("PG", "brand portfolio + retail shelf-space scale"),
+        ("CL", "global distribution + brand"),
+    ],
+    "Apparel": [
+        ("NKE", "brand + global distribution"),
+        ("LULU", "vertical premium-brand model"),
+    ],
+    "Hotel/Gaming": [
+        ("MAR", "asset-light franchise + loyalty-program scale"),
+        ("LVS", "integrated-resort license scarcity"),
+    ],
+    "Transportation (Railroads)": [
+        ("UNP", "duopoly rail network, right-of-way can't be replicated"),
+        ("NSC", "same — regional rail duopoly"),
+    ],
+    "Aerospace/Defense": [
+        ("LMT", "sole-source, decades-long weapons-program contracts"),
+        ("TDG", "sole-source aftermarket parts monopoly pricing"),
+    ],
+    "Information Services": [
+        ("SPGI", "ratings duopoly + index licensing"),
+        ("MCO", "ratings duopoly"),
+    ],
+    "Investments & Asset Management": [
+        ("BLK", "iShares ETF scale + distribution"),
+        ("TROW", "no-distribution-cost direct-sold fund scale"),
+    ],
+    "Financial Svcs. (Non-bank & Insurance)": [
+        ("V", "two-sided payment-network effects"),
+        ("MA", "two-sided payment-network effects"),
+    ],
+    "Healthcare Products": [
+        ("ISRG", "installed-base + instrument/service razor-razorblade lock-in"),
+        ("SYK", "surgeon training + relationship lock-in"),
+    ],
+    "Business & Consumer Services": [
+        ("ADP", "payroll-switching-cost lock-in"),
+        ("EFX", "credit-bureau data oligopoly"),
+    ],
+}
+
+
+def exemplar_financial_snapshot(ticker):
+    """
+    Best-effort current operating margin for a named moat exemplar (see
+    INDUSTRY_EXEMPLARS) — pulled fresh from EDGAR the same way as the
+    main run, but silently returns None on ANY failure (ticker not
+    found, EDGAR unreachable, no usable data). This is a reference
+    footnote, not a required input, so unlike get_metric_value it never
+    prompts for manual entry — an exemplar with a hole in its data just
+    doesn't print that line.
+
+    Two things borrowed from the main pipeline, not simplified away:
+    - Falls back to pretax income + interest expense when EBIT isn't
+      tagged (same as run_full_valuation's own rebuild) — several
+      exemplars (banks, insurers, retailers that go straight to pretax
+      income on their income statement) have no OperatingIncomeLoss tag
+      at all, which without this fallback read as a lookup failure for
+      8 of the first 23 industries tried, not as the moat check for
+      their actual business.
+    - Requires revenue and EBIT to resolve to the SAME (or adjacent)
+      fiscal year. Pulling each independently otherwise risks a stale
+      tag on one side (e.g. a filer that stopped tagging
+      OperatingIncomeLoss years ago but still tags revenue under the
+      current ASC 606 tag) silently dividing a 2014 EBIT by a 2025
+      revenue — caught live on KLAC, Travelers, and J&J before this
+      check was added.
+    """
+    try:
+        data = fetch_json_or_none(EDGAR_TICKER_MAP_URL)
+        if not data:
+            return None
+        cik = next((str(e["cik_str"]).zfill(10) for e in data.values()
+                   if e["ticker"].upper() == ticker.upper()), None)
+        if cik is None:
+            return None
+        facts = fetch_json_or_none(EDGAR_FACTS_URL.format(cik=cik))
+        if not facts:
+            return None
+        revenue, _, rev_fy, rev_unit = get_latest_annual_value(facts, METRIC_TAGS["revenue"])
+        ebit, _, ebit_fy, ebit_unit = get_latest_annual_value(facts, METRIC_TAGS["operating_income"])
+        # Missing OR stale (some filers tagged OperatingIncomeLoss years
+        # ago, then stopped — KLAC, Travelers, J&J, Public Storage all
+        # resolved a real-looking but decade-old EBIT this way) — try
+        # the pretax+interest rebuild either way, and only use it if
+        # IT'S actually fresh.
+        if ebit is None or ebit_fy is None or not revenue or abs(rev_fy - ebit_fy) > 1:
+            rebuilt = pretax_plus_interest_series(facts, years=1)
+            if rebuilt and abs(rev_fy - rebuilt[-1]["fiscal_year"]) <= 1:
+                latest = rebuilt[-1]
+                ebit, ebit_fy, ebit_unit = latest["val"], latest["fiscal_year"], latest["unit"]
+        if not revenue or ebit is None or rev_unit != ebit_unit or abs(rev_fy - ebit_fy) > 1:
+            return None
+        return {"margin": ebit / revenue, "fiscal_year": max(rev_fy, ebit_fy)}
+    except Exception:
+        return None
+
+
+def print_moat_exemplars(mix):
+    """
+    Printed only when the margin or ROIC sanity check above actually
+    fired — real companies in the SAME Damodaran industry group with a
+    genuinely sustained (not just-this-year) above-industry edge, and
+    the mechanism behind it, so that warning is something concrete to
+    argue against rather than a number to glance past. A no-op for any
+    industry not yet in INDUSTRY_EXEMPLARS (most of them — see that
+    dict's docstring for why this is deliberately partial), or if both
+    of an industry's exemplar lookups fail.
+    """
+    for name, _ in mix:
+        exemplars = INDUSTRY_EXEMPLARS.get(name)
+        if not exemplars:
+            continue
+        lines = []
+        for ticker, mechanism in exemplars:
+            snap = exemplar_financial_snapshot(ticker)
+            if snap is None:
+                continue
+            lines.append(f"    {ticker}: {snap['margin']:.1%} operating margin "
+                        f"(FY{snap['fiscal_year']}) — {mechanism}")
+        if lines:
+            print(f"  Real-world moat check ({name}) — is this story really built like one of these?")
+            for line in lines:
+                print(line)
+
+
 def print_terminal_share(breakdown, years):
     """Sanity check shared by both DCFs: how much of the value is the
     terminal value. Returns the share (None when EV isn't positive)."""
@@ -3018,7 +3227,15 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
 
     revenue = operating_metric("revenue", "revenue")
     rebuilt = pretax_plus_interest_series(facts, years=1)
-    if financials["operating_income"]["value"] is None and rebuilt:
+    # A stale operating-income tag (Lennar stopped tagging it after FY2020)
+    # is worse than a current rebuild from pretax income + interest.
+    oi_stale = ("operating_income" in stale and rebuilt and financials["operating_income"]["fiscal_year"] is not None
+                and rebuilt[-1]["fiscal_year"] > financials["operating_income"]["fiscal_year"])
+    if oi_stale:
+        print(f"  Operating income is only tagged through FY{financials['operating_income']['fiscal_year']} — "
+              "rebuilding it from pretax income + interest instead.")
+        stale.remove("operating_income")
+    if (financials["operating_income"]["value"] is None or oi_stale) and rebuilt:
         latest_rebuilt = rebuilt[-1]
         period_label = f"FY{latest_rebuilt['fiscal_year']}"
         # Keep the rebuild on the same TTM basis as revenue: TTM pretax
@@ -4657,8 +4874,10 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         print(f"  Year-{narrative_years} operating margin: {margin_10:.1%}" +
               (f"   industry: {industry_margin:.1%} (Damodaran, {margin_date}, lease & R&D adjusted)"
                if industry_margin is not None else "   (no industry figure — industry not chosen)"))
+        needs_moat_check = False
         if industry_margin is not None and industry_margin > 0 and margin_10 > 1.5 * industry_margin:
             print(f"    ⚠ {margin_10 / industry_margin:.1f}x the industry's margin — the story needs a lasting edge")
+            needs_moat_check = True
         if roic_10 is None:
             print("  Year-10 return on capital: n/a (capital in place isn't positive)")
         else:
@@ -4669,8 +4888,11 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
                 print("    ⚠ below the cost of capital — at this point growth is destroying value")
             elif industry_roic is not None and industry_roic > 0 and roic_10 > 2 * industry_roic:
                 print(f"    ⚠ {roic_10 / industry_roic:.1f}x the industry's return — needs a durable competitive advantage")
+                needs_moat_check = True
         if industry_margin is not None or industry_roic is not None:
             print("    (Industry figures are the latest year's, so a cyclical industry at a trough reads low.)")
+        if needs_moat_check:
+            print_moat_exemplars(mix)
 
         # ---- Failure-probability overlay: every DCF above (including
         # this narrative one) implicitly assumes the company SURVIVES to
