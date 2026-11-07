@@ -281,6 +281,7 @@ def value_one(args):
     result row (dict). Runs in a worker process: its own saved-choice
     files, so parallel runs can't overwrite each other's industry picks."""
     ticker, flags, needs, log_dir, answers = args
+    valuation.SKIP_IMPLIED_VOLATILITY = True
     if flags.get("insight"):
         return insight_one(ticker, {k: v for k, v in flags.items() if k != "insight"}, needs, log_dir)
     work = tempfile.mkdtemp()

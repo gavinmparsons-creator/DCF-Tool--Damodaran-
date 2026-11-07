@@ -1352,6 +1352,31 @@ def reit_metric(facts_json, label, tag_candidates, latest_fy, fx_currency, fx_ra
     return parse_number(override) if override else chosen
 
 
+_YAHOO_INFO = {}
+# Screens set this: implied volatility is reference-only, and Yahoo's options
+# endpoint is the first to rate-limit a batch of hundreds of companies.
+SKIP_IMPLIED_VOLATILITY = False
+
+
+def yahoo_info(ticker):
+    """yfinance's info dict for `ticker`, fetched once per run: the price,
+    beta and share-count lookups share it, which halves the calls a screen
+    makes and keeps it under Yahoo's rate limit. Raises what yfinance raises."""
+    if ticker not in _YAHOO_INFO:
+        _YAHOO_INFO[ticker] = yf.Ticker(ticker).info
+    return _YAHOO_INFO[ticker]
+
+
+def yahoo_last_close(ticker):
+    """The latest close from Yahoo's price history (a different endpoint from
+    info, rarely rate-limited), or None."""
+    try:
+        hist = yf.Ticker(ticker).history(period="5d", auto_adjust=False)["Close"].dropna()
+        return float(hist.iloc[-1]) if len(hist) else None
+    except Exception:
+        return None
+
+
 def get_market_data(ticker):
     """
     Try to pull beta and current share price, trying each source in turn:
@@ -1369,7 +1394,7 @@ def get_market_data(ticker):
     """
     if YFINANCE_AVAILABLE:
         try:
-            info = yf.Ticker(ticker).info
+            info = yahoo_info(ticker)
             beta = info.get("beta")
             price = info.get("currentPrice") or info.get("regularMarketPrice")
             if price is not None:
@@ -1380,6 +1405,10 @@ def get_market_data(ticker):
                 print("  yfinance response was missing the share price — trying next source.")
         except Exception as e:
             print(f"  yfinance request failed ({e}) — trying next source.")
+        close = yahoo_last_close(ticker)
+        if close is not None:
+            print(f"  Pulled from Yahoo's price history: share price=${close:,.2f} (no beta — the industry beta is used)")
+            return None, close
 
     if FMP_API_KEY:
         url = FMP_PROFILE_URL.format(ticker=ticker.upper(), key=FMP_API_KEY)
@@ -2305,7 +2334,7 @@ def get_market_shares(ticker):
     FMP (market cap / price). None if neither is available."""
     if YFINANCE_AVAILABLE:
         try:
-            info = yf.Ticker(ticker).info
+            info = yahoo_info(ticker)
             shares = info.get("impliedSharesOutstanding") or info.get("sharesOutstanding")
             if shares:
                 return float(shares)
@@ -3275,7 +3304,8 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     # qualitative adjustment). Best-effort: Yahoo's options endpoint is
     # unofficial, rate-limited, and can fail silently — that's fine,
     # this never blocks the rest of the run. ----
-    implied_vol, iv_expiration, iv_days_out = get_implied_volatility(ticker)
+    implied_vol, iv_expiration, iv_days_out = (None, None, None) if SKIP_IMPLIED_VOLATILITY \
+        else get_implied_volatility(ticker)
     if implied_vol is not None:
         print(f"  Market-implied volatility (~{iv_days_out}-day, ATM straddle, exp {iv_expiration}): "
               f"{implied_vol:.1%}  (reference only — not used below)")

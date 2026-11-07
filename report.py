@@ -234,7 +234,12 @@ def company_report(ticker):
     if revenue:
         lines += ["| Year | Revenue |", "|---|---|"] + [
             f"| FY{e['fiscal_year']} | ${e['val'] / 1e9:,.2f}B |" for e in revenue] + [""]
-    lines += [f"- Revenue growth {span or ''}: **{pct(cagr)}** a year",
+    last_year = (revenue[-1]["val"] / revenue[-2]["val"] - 1
+                 if len(revenue) >= 2 and revenue[-2]["val"] > 0 else None)
+    lines += [f"- Revenue growth {span or ''}: **{pct(cagr)}** a year; latest year "
+              f"(FY{revenue[-1]['fiscal_year'] if revenue else ''}) **{pct(last_year)}**"
+              + (" — a big break from the trend (an acquisition, a divestiture, a new product?)"
+                 if last_year is not None and cagr is not None and abs(last_year - cagr) > 0.20 else ""),
               f"- Operating margin over the cycle (as reported): mean "
               f"**{pct(stats['mean']) if stats else 'n/a'}**, median {pct(stats['median']) if stats else 'n/a'} "
               f"({stats['n_years'] if stats else 0} years)",
@@ -252,12 +257,9 @@ def company_report(ticker):
     # The cycle history is reported margin; the story's margins count R&D as
     # investment (and leases as debt). Shift the cycle average by today's gap
     # between the two, so all three margins are on the story's basis.
-    reported_now = None
-    rev_now = _num(r"\n  revenue\s+:\s+([\d,]+)", text)
-    oi_now = _num(r"\n  operating_income\s+:\s+(-?[\d,]+)", text)
-    if rev_now and oi_now is not None:
-        reported_now = oi_now / rev_now
-    offset = story.margin_now - reported_now if reported_now is not None else 0.0
+    rd_adjustment = _num(r"EBIT adjustment \(added to reported EBIT\):\s+([+-]?[\d,]+)", text) or 0.0
+    lease_adjustment = _num(r"-> debt \+\$[\d,]+, EBIT \+\$([\d,]+)", text) or 0.0
+    offset = (rd_adjustment + lease_adjustment) / story.revenue if story.revenue else 0.0
     cycle_margin = stats["mean"] + offset if stats and stats["mean"] + offset > 0 else None
     margins = [("today's", story.margin_now)]
     if cycle_margin is not None and abs(cycle_margin - story.margin_now) > 0.01:
