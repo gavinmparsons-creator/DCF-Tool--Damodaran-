@@ -1117,6 +1117,26 @@ def freshest_instant(facts_json, tag_candidates):
     return val, tag, fy, unit
 
 
+def ttm_from_quarters(facts_json, tag_candidates):
+    """Trailing twelve months of a flow figure from 10-Qs alone, for a
+    company with no annual report yet: the last four tagged quarters when
+    they're back to back, otherwise the latest year-to-date figure
+    annualized. Returns (value, label) or (None, None)."""
+    for tag in tag_candidates:
+        entries = [e for e in _quarterly_entries(facts_json, tag, "USD") if e.get("start")]
+        if not entries:
+            continue
+        quarters = {e["end"]: e["val"] for e in entries if _days(e["start"], e["end"]) < 100}
+        ends = sorted(quarters)[-4:]
+        if len(ends) == 4 and _days(ends[0], ends[-1]) <= 290:
+            return sum(quarters[e] for e in ends), f"four quarters to {ends[-1]}"
+        latest_end = max(e["end"] for e in entries)
+        ytd = max((e for e in entries if e["end"] == latest_end), key=lambda e: _days(e["start"], e["end"]))
+        days = _days(ytd["start"], ytd["end"])
+        return ytd["val"] * 365 / days, f"{round(days / 30.4)} months to {latest_end}, annualized"
+    return None, None
+
+
 def freshest_ttm(facts_json, tag_candidates):
     """freshest_annual_value for a flow figure, upgraded to trailing twelve
     months when a newer 10-Q year-to-date exists. Returns (value, tag,
@@ -2923,10 +2943,14 @@ def run_financial_firm_valuation(summary, facts, fx_currency, fx_rate, financial
     print("  A bank's or broker's debt is raw material, not financing, so it's valued at the")
     print("  equity level: book equity + PV of (ROE - cost of equity) x book equity.")
 
-    equity_hist = by_year(["StockholdersEquity"])
+    # Some banks tag equity only with noncontrolling interest included (Park
+    # National); IFRS banks use EquityAttributableToOwnersOfParent.
+    equity_hist = by_year(["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+                           "EquityAttributableToOwnersOfParent"])
     preferred_hist = by_year(PREFERRED_EQUITY_TAGS)
     ni_common = by_year(COMMON_NET_INCOME_TAGS)
-    ni_total, pref_divs = by_year(["NetIncomeLoss"]), by_year(PREFERRED_DIVIDEND_TAGS)
+    ni_total, pref_divs = (by_year(["NetIncomeLoss", "ProfitLossAttributableToOwnersOfParent"]),
+                           by_year(PREFERRED_DIVIDEND_TAGS))
     for fy, ni in ni_total.items():
         if fy not in ni_common:
             ni_common[fy] = ni - pref_divs.get(fy, 0.0)
@@ -2963,6 +2987,13 @@ def run_financial_firm_valuation(summary, facts, fx_currency, fx_rate, financial
     avg_roe = sum(ni / eq for _, ni, eq, _ in rows) / len(rows) if rows else None
     if rows:
         print(f"  ROE: latest FY{rows[-1][0]} {latest_roe:.1%}, {len(rows)}-yr average {avg_roe:.1%}")
+    elif common_bv > 0:
+        # No annual history yet (a recent listing): trailing net income from
+        # the 10-Qs over today's common equity.
+        ttm_ni, label = ttm_from_quarters(facts, COMMON_NET_INCOME_TAGS + ["NetIncomeLoss"])
+        if ttm_ni is not None:
+            latest_roe = ttm_ni / common_bv
+            print(f"  ROE from the 10-Qs ({label}): {latest_roe:.1%} on today's common equity")
     current_roe = prompt_number(
         "  Current ROE as a percent " + (f"(Enter for the latest, {latest_roe:.1%}): " if rows else ": "),
         default=latest_roe * 100 if rows else None) / 100
@@ -2970,7 +3001,13 @@ def run_financial_firm_valuation(summary, facts, fx_currency, fx_rate, financial
     recent = rows[-3:]
     ni_sum = sum(ni for _, ni, _, _ in recent)
     default_payout = (sum(r for _, _, _, r in recent) / ni_sum) if recent and ni_sum > 0 else None
-    if default_payout is not None:
+    if default_payout is None and rows and rows[-1][1] > 0:
+        recent = rows[-1:]  # losses in the window: the latest profitable year alone
+        default_payout = rows[-1][3] / rows[-1][1]
+    if default_payout is None:
+        print("  No profitable year on record to measure a payout against — defaulting to 0% (everything retained).")
+        default_payout = 0.0
+    elif default_payout is not None:
         clipped = min(max(default_payout, 0.0), 1.0)
         print(f"  Payout over FY{recent[0][0]}-FY{recent[-1][0]}: {default_payout:.0%}"
               + (" (capped at 0-100%)" if clipped != default_payout else ""))
