@@ -26,6 +26,15 @@
     ],
     "sic": 2821
   },
+  "GENB": {
+    "industries": [
+      [
+        "Drugs (Biotechnology)",
+        1.0
+      ]
+    ],
+    "sic": 2834
+  },
   "KO": {
     "industries": [
       [

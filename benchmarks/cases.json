@@ -18,6 +18,8 @@
      "flags": {}, "answers": [["type a country name", "Taiwan"]]},
     {"ticker": "SNOW", "why": "never GAAP-profitable: cycle normalization must decline", "flags": {}, "answers": []},
     {"ticker": "SCHW", "why": "brokerage/bank: excess return model (--financial), preferred stock out of book equity, levered industry beta",
-     "flags": {"financial": true}, "answers": []}
+     "flags": {"financial": true}, "answers": []},
+    {"ticker": "GENB", "why": "recent IPO with only 10-Qs: flows annualized from year-to-date, balances (incl. marketable securities, leases) from the latest 10-Q",
+     "flags": {"biotech": true}, "answers": []}
   ]
 }

@@ -102,6 +102,36 @@
     "wacc": 0.0737458233777977,
     "working_capital_ratio": 0.16210000000000002
   },
+  "GENB": {
+    "adr_ratio": 1.0,
+    "beta": 1.1078113749578236,
+    "bridge_cash": 457415000.0,
+    "bridge_debt": 57518000.0,
+    "cash": 457415000,
+    "company": "Generate Biomedicines, Inc.",
+    "cost_of_equity": 0.09745448163564002,
+    "dcf": {
+      "base": -11.679354211503842,
+      "high": -13.465009157686861,
+      "low": -10.223809571422015
+    },
+    "ebit": -272346266.6666667,
+    "erp": 0.0441,
+    "fcff": -211538022.88888893,
+    "return_on_new_capital": null,
+    "revenue": 27452055.555555556,
+    "risk_free_rate": 0.048600000000000004,
+    "sanity": {
+      "tv_share_dcf": null
+    },
+    "share_price": 13.06,
+    "shares": 152645973.0,
+    "terminal_growth": 0.025,
+    "ticker": "GENB",
+    "total_debt": 57518000.0,
+    "wacc": 0.10047656304547804,
+    "working_capital_ratio": 0.1336
+  },
   "KO": {
     "adr_ratio": 1.0,
     "beta": 0.6811995947273399,

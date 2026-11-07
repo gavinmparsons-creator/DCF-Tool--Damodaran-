@@ -1029,7 +1029,15 @@ def freshest_instant(facts_json, tag_candidates):
     main financials dict (short-term investments, leases, the equity
     bridge) are dated the same as cash and debt. Same return shape."""
     val, tag, fy, unit = freshest_annual_value(facts_json, tag_candidates)
-    if val is None or not tag or "+" in tag:
+    if val is None:
+        # No annual report yet (a recent IPO): the latest 10-Q balance.
+        for candidate in tag_candidates:
+            if isinstance(candidate, str):
+                q_val, q_end = latest_quarter_instant(facts_json, candidate, "USD", "")
+                if q_val is not None:
+                    return q_val, candidate, int(q_end[:4]), "USD"
+        return val, tag, fy, unit
+    if not tag or "+" in tag:
         return val, tag, fy, unit
     periods = _recipe_annual_entries(_all_taxonomy_tags(facts_json), tag)
     if periods:
@@ -1125,6 +1133,56 @@ def apply_latest_quarter(facts_json, financials):
             val, as_of = latest_quarter_instant(facts_json, tag, info["unit"], annual_end)
             if val is not None:
                 info.update(value=val, as_of=as_of, quarterly=True)
+
+
+def apply_quarterly_only(facts_json, financials):
+    """
+    For a company that has filed 10-Qs but no annual report yet (a recent
+    IPO — Generate Biomedicines listed in February 2026), every annual
+    lookup comes back empty. Fill `financials` in place from the 10-Qs:
+    balance-sheet items at the latest quarter; flows as the sum of the
+    last four tagged quarters when they're there, otherwise the latest
+    year-to-date figure ANNUALIZED (an IPO's 10-Qs rarely reach back a
+    full year — the rest is in the S-1, which isn't in XBRL). Annualized
+    entries are flagged in the report as such.
+    """
+    for metric, info in financials.items():
+        if metric == "dividends_per_share":
+            continue
+        for recipe in METRIC_TAGS[metric]:
+            if not isinstance(recipe, str):
+                continue
+            units = _all_taxonomy_tags(facts_json).get(recipe, {}).get("units", {})
+            unit = "shares" if "shares" in units else ("USD" if "USD" in units else None)
+            if unit is None:
+                continue
+            entries = _quarterly_entries(facts_json, recipe, unit)
+            if metric in LATEST_QUARTER_INSTANT_METRICS:
+                instants = [e for e in entries if not e.get("start")]
+                if not instants:
+                    continue
+                latest = max(instants, key=lambda e: (e["end"], e.get("filed", "")))
+                info.update(value=latest["val"], tag=recipe, unit=unit, fiscal_year=int(latest["end"][:4]),
+                            as_of=latest["end"], quarterly=True)
+                break
+            durations = [e for e in entries if e.get("start")]
+            if not durations:
+                continue
+            quarters = {}
+            for e in durations:
+                if _days(e["start"], e["end"]) < 100:
+                    quarters[e["end"]] = e["val"]
+            ends = sorted(quarters)[-4:]
+            if len(ends) == 4 and _days(ends[0], ends[-1]) <= 290:  # four back-to-back quarters
+                info.update(value=sum(quarters[e] for e in ends), tag=recipe, unit=unit,
+                            fiscal_year=int(ends[-1][:4]), as_of=ends[-1], ttm=True)
+                break
+            latest_end = max(e["end"] for e in durations)
+            ytd = max((e for e in durations if e["end"] == latest_end), key=lambda e: _days(e["start"], e["end"]))
+            days = _days(ytd["start"], ytd["end"])
+            info.update(value=ytd["val"] * 365 / days, tag=recipe, unit=unit, fiscal_year=int(latest_end[:4]),
+                        as_of=latest_end, annualized_months=round(days / 30.4))
+            break
 
 
 # Tags for a company's TOTAL debt, checked only when the usual current /
@@ -1384,7 +1442,10 @@ def pull_financials(cik):
     for metric, tags in METRIC_TAGS.items():
         val, tag, fy, unit = get_latest_annual_value(facts, tags)
         results[metric] = {"value": val, "tag": tag, "fiscal_year": fy, "unit": unit}
-    apply_latest_quarter(facts, results)
+    if all(info["value"] is None for info in results.values()):
+        apply_quarterly_only(facts, results)  # a recent IPO: 10-Qs but no annual report yet
+    else:
+        apply_latest_quarter(facts, results)
     return results, facts
 
 
@@ -1567,7 +1628,9 @@ def print_financials_report(company_name, financials):
                     and most_recent_fy - info["fiscal_year"] >= 2:
                 flag = "  ⚠ STALE — years behind other metrics, verify manually"
                 stale.append(metric)
-            period = (f"TTM to {info['as_of']}" if info.get("ttm") else
+            period = (f"ANNUALIZED from {info['annualized_months']} months to {info['as_of']}"
+                      if info.get("annualized_months") else
+                      f"TTM to {info['as_of']}" if info.get("ttm") else
                       f"as of {info['as_of']}" if info.get("quarterly") else f"FY{info['fiscal_year']}")
             print(f"  {metric:28s}: {display:>20s}   (tag: {info['tag']}, {period}){flag}")
 
@@ -1576,6 +1639,10 @@ def print_financials_report(company_name, financials):
         print("     This usually means the company switched XBRL tags and this")
         print("     script's fallback list doesn't include their current one yet.")
         print("     Don't trust these figures without checking the actual 10-K.")
+    annualized = [metric for metric, info in financials.items() if info.get("annualized_months")]
+    if annualized:
+        print(f"\n  ⚠ No annual report yet (a recent IPO?): {', '.join(annualized)} are the latest")
+        print("    year-to-date figures annualized from the 10-Qs. A full year is in the S-1 prospectus.")
     if missing:
         print(f"\n  ⚠ Missing metrics: {', '.join(missing)}")
         print("    You'll need to fill these in manually from the 10-K.")
