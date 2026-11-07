@@ -2114,8 +2114,9 @@ SIC_TO_DAMODARAN_INDUSTRY = [
     (1400, 1499, "Metals & Mining"),
     (1520, 1531, "Homebuilding"),
     (1500, 1799, "Engineering/Construction"),
-    (2080, 2085, "Beverage (Alcoholic)"),
-    (2086, 2087, "Beverage (Soft)"),
+    (2082, 2085, "Beverage (Alcoholic)"),  # brewers, wineries, distillers
+    (2080, 2087, "Beverage (Soft)"),  # 2080 "Beverages" is Coca-Cola and PepsiCo; 2086-2087 soft drinks
+
     (2000, 2099, "Food Processing"),
     (2100, 2199, "Tobacco"),
     (2200, 2399, "Apparel"),
@@ -2137,6 +2138,7 @@ SIC_TO_DAMODARAN_INDUSTRY = [
     (3310, 3329, "Steel"),
     (3300, 3399, "Metals & Mining"),
     (3570, 3579, "Computers/Peripherals"),
+    (3559, 3559, "Semiconductor Equip"),  # "special industry machinery": Lam Research, ASML
     (3400, 3599, "Machinery"),
     (3630, 3659, "Electronics (Consumer & Office)"),
     (3600, 3629, "Electrical Equipment"),

@@ -134,16 +134,16 @@
   },
   "KO": {
     "adr_ratio": 1.0,
-    "beta": 0.6811995947273399,
+    "beta": 0.6271361348283447,
     "bridge_cash": 34395000000,
     "bridge_debt": 45429000000.0,
     "cash": 13685000000,
     "company": "COCA COLA CO",
-    "cost_of_equity": 0.07841038297854828,
+    "cost_of_equity": 0.07613971766279048,
     "dcf": {
-      "base": 36.279265786097135,
-      "high": 42.8566389036947,
-      "low": 31.271967594463867
+      "base": 37.134369244988115,
+      "high": 44.061312006826114,
+      "low": 31.895649241712366
     },
     "ebit": 15404158000.0,
     "erp": 0.042,
@@ -152,15 +152,15 @@
     "revenue": 51054000000,
     "risk_free_rate": 0.049800000000000004,
     "sanity": {
-      "tv_share_dcf": 0.8093547539300152
+      "tv_share_dcf": 0.8109703702289531
     },
     "share_price": 92.82,
     "shares": 4312902335.0,
     "terminal_growth": 0.025,
     "ticker": "KO",
     "total_debt": 43268000000,
-    "wacc": 0.07502535710659106,
-    "working_capital_ratio": 0.1464
+    "wacc": 0.07297668383569775,
+    "working_capital_ratio": -0.06
   },
   "NFLX": {
     "adr_ratio": 1.0,
