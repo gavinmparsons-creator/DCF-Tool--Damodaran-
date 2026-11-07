@@ -181,6 +181,42 @@ def market_cap(ticker):
         return None
 
 
+def run_warnings(text, needs, ticker=None, price=None):
+    """The data warnings in one run's printed output, as a '; '-joined
+    string, and the market cap (filed basic shares x price, or None).
+    `needs`: the metrics the model used counts as missing (a bank has no
+    revenue line). With a ticker, the filed share count is also checked
+    against the market's."""
+    warnings = {label for pattern, label in WARNING_PATTERNS if re.search(pattern, text)}
+    missing = re.search(r"Missing metrics: (.*)", text)
+    missing = [m for m in missing.group(1).split(", ") if m in needs] if missing else []
+    stale = re.search(r"possibly stale data: (.*)", text)
+    stale = [m for m in stale.group(1).split(", ") if m not in IGNORED_STALE] if stale else []
+    if "now reports total debt under a different tag" in text:  # stale debt tags, but a current total was found
+        stale = [m for m in stale if not m.startswith("total_debt")]
+    if "Rebuilt as pretax income" in text:  # no (current) operating-income line, but rebuilt from pretax + interest
+        missing = [m for m in missing if m != "operating_income"]
+        stale = [m for m in stale if m != "operating_income"]
+    if missing:
+        warnings.add("missing " + "/".join(missing))
+    if stale:
+        warnings.add("stale " + "/".join(stale))
+    market_cap = None
+    shares = re.search(r"Shares: ([\d,]+) basic", text)
+    if shares and price:
+        filed = float(shares.group(1).replace(",", ""))
+        market_cap = filed * price
+        # A dual-class or Up-C company can file one class's count (Smith
+        # Douglas: 9.2M Class A of ~51M economic shares), inflating value per share.
+        try:
+            market_shares = valuation.get_market_shares(ticker) if ticker else None
+        except Exception:
+            market_shares = None
+        if market_shares and not 0.67 <= filed / market_shares <= 1.5:
+            warnings.add(f"share count {filed / market_shares:.2f}x the market's (dual class / Up-C?)")
+    return "; ".join(sorted(warnings)), market_cap
+
+
 def value_one(args):
     """Run valuation.py on one ticker with every default accepted. Returns a
     result row (dict). Runs in a worker process: its own saved-choice
@@ -220,33 +256,7 @@ def value_one(args):
     row["price"] = float(price.group(1).replace(",", "")) if price else None
     implied = re.search(r"implies a (?:stable ROE|high-growth-stage rate) of (-?[\d.]+)%", text)
     row["price_implies"] = float(implied.group(1)) / 100 if implied else None
-    warnings = {label for pattern, label in WARNING_PATTERNS if re.search(pattern, text)}
-    # Only metrics this sector's model uses count as missing (a bank has no revenue line).
-    missing = re.search(r"Missing metrics: (.*)", text)
-    missing = [m for m in missing.group(1).split(", ") if m in needs] if missing else []
-    stale = re.search(r"possibly stale data: (.*)", text)
-    stale = [m for m in stale.group(1).split(", ") if m not in IGNORED_STALE] if stale else []
-    if "Rebuilt as pretax income" in text:  # no (current) operating-income line, but rebuilt from pretax + interest
-        missing = [m for m in missing if m != "operating_income"]
-        stale = [m for m in stale if m != "operating_income"]
-    if missing:
-        warnings.add("missing " + "/".join(missing))
-    if stale:
-        warnings.add("stale " + "/".join(stale))
-    row["warnings"] = "; ".join(sorted(warnings))
-    shares = re.search(r"Shares: ([\d,]+) basic", text)
-    if shares and row["price"]:
-        filed = float(shares.group(1).replace(",", ""))
-        row["market_cap"] = filed * row["price"]
-        # A dual-class or Up-C company can file one class's count (Smith
-        # Douglas: 9.2M Class A of ~51M economic shares), inflating value per share.
-        try:
-            market_shares = valuation.get_market_shares(ticker)
-        except Exception:
-            market_shares = None
-        if market_shares and not 0.67 <= filed / market_shares <= 1.5:
-            row["warnings"] = "; ".join(filter(None, [row["warnings"], f"share count {filed / market_shares:.2f}x "
-                                                     "the market's (dual class / Up-C?)"]))
+    row["warnings"], row["market_cap"] = run_warnings(text, needs, ticker, row["price"])
     if row.get("base") is not None and row.get("price"):
         row["value_to_price"] = row["base"] / row["price"]
     os.makedirs(log_dir, exist_ok=True)
