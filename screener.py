@@ -118,7 +118,7 @@ def value_one(args):
     """Run valuation.py on one ticker with every default accepted. Returns a
     result row (dict). Runs in a worker process: its own saved-choice
     files, so parallel runs can't overwrite each other's industry picks."""
-    ticker, flags, needs, log_dir = args
+    ticker, flags, needs, log_dir, answers = args
     work = tempfile.mkdtemp()
     valuation.INDUSTRY_MAP_PATH = os.path.join(work, "industry_map.json")
     valuation.ADR_RATIO_PATH = os.path.join(work, "adr_ratios.json")
@@ -129,8 +129,9 @@ def value_one(args):
         seen[prompt] = seen.get(prompt, 0) + 1
         if seen[prompt] > 3:
             raise RuntimeError(f"needs a typed answer: {prompt.strip()[:80]}")
-        print(prompt)
-        return ""
+        answer = next((value for sub, value in answers if sub in prompt), "")
+        print(prompt + answer)
+        return answer
 
     builtins.input = enter_everything
     out = io.StringIO()
@@ -194,6 +195,9 @@ def main():
     parser.add_argument("--max-cap", type=float, default=float("inf"), help="maximum market cap (e.g. 5e9)")
     parser.add_argument("--limit", type=int, help="value only the first N companies (a quick test)")
     parser.add_argument("--workers", type=int, default=4, help="companies valued at once (default 4)")
+    parser.add_argument("--answer", action="append", default=[], metavar="PROMPT=VALUE",
+                        help="answer every prompt containing PROMPT with VALUE instead of Enter, e.g. "
+                             "--answer \"type a beta to use as is=0.76\" (repeatable)")
     args = parser.parse_args()
 
     spec = SECTORS[args.sector]
@@ -219,7 +223,8 @@ def main():
     rows = []
     print(f"Valuing {len(universe)} companies ({args.workers} at a time; each takes ~20-60 seconds)...")
     with multiprocessing.Pool(args.workers) as pool:
-        jobs = [(t, spec["flags"], spec["needs"], log_dir) for t, _, _, _ in universe]
+        answers = [tuple(a.split("=", 1)) for a in args.answer]
+        jobs = [(t, spec["flags"], spec["needs"], log_dir, answers) for t, _, _, _ in universe]
         for i, row in enumerate(pool.imap_unordered(value_one, jobs), start=1):
             row["name"], row["sic"] = names[row["ticker"]]
             rows.append(row)
