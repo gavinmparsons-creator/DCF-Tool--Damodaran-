@@ -160,17 +160,33 @@ def cap_universe(spec):
             in_range.append((ticker, cik, name))
     found = []
     lo, hi = spec.get("exclude_sic", (0, -1))
-    print(f"  {len(in_range)} in the market-cap range; looking up industry codes...", flush=True)
-    for i, (ticker, cik, name) in enumerate(in_range, start=1):
-        if i % 200 == 0:
-            print(f"    {i}/{len(in_range)}", flush=True)
-        try:
-            sic = int(json.loads(_get(EDGAR_SUBMISSIONS_URL.format(cik=cik))).get("sic") or 0)
-        except Exception:
-            sic = 0
-        time.sleep(0.12)  # SEC asks for no more than 10 requests a second
+    # Industry codes almost never change, so each one found is kept for good
+    # (screens/sic_codes.json): only new companies cost a request next time.
+    sic_cache_path = os.path.join(SCREEN_DIR, "sic_codes.json")
+    try:
+        with open(sic_cache_path) as f:
+            sic_cache = json.load(f)
+    except (OSError, ValueError):
+        sic_cache = {}
+    todo = sum(str(cik) not in sic_cache for _, cik, _ in in_range)
+    print(f"  {len(in_range)} in the market-cap range; looking up {todo} new industry codes...", flush=True)
+    looked_up = 0
+    for ticker, cik, name in in_range:
+        if str(cik) not in sic_cache:
+            try:
+                sic_cache[str(cik)] = int(json.loads(_get(EDGAR_SUBMISSIONS_URL.format(cik=cik))).get("sic") or 0)
+            except Exception:
+                sic_cache[str(cik)] = 0
+            looked_up += 1
+            if looked_up % 200 == 0:
+                print(f"    {looked_up}/{todo}", flush=True)
+            time.sleep(0.12)  # SEC asks for no more than 10 requests a second
+        sic = sic_cache[str(cik)]
         if not lo <= sic <= hi:
             found.append((ticker, cik, name, sic))
+    os.makedirs(SCREEN_DIR, exist_ok=True)
+    with open(sic_cache_path, "w") as f:
+        json.dump(sic_cache, f)
     return found
 
 
