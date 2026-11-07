@@ -48,10 +48,18 @@ SECTORS = {
                  "about": "homebuilders, land developers and residential contractors (Lennar files as one) "
                           "(--cyclical)",
                  "needs": {"revenue", "operating_income", "cash", "shares_outstanding", "book_equity"}},
+    # Small caps: every listed operating company from $300M to $2B, on the
+    # standard model. Financials, REITs and blank-check shells (SIC 6000-6999)
+    # are left out — they need bank or REIT mode.
+    "smallcap": {"universe": "cap", "min_cap": 3e8, "max_cap": 2e9, "exclude_sic": (6000, 6999), "flags": {},
+                 "about": "listed operating companies from $300M to $2B, excluding financials and REITs",
+                 "needs": {"revenue", "operating_income", "cash", "shares_outstanding", "book_equity"}},
 }
 EDGAR_SIC_URL = ("https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&SIC={sic}&type=10-K"
                  "&dateb=&owner=include&count=100&start={start}&output=atom")
 EDGAR_TICKERS_URL = "https://www.sec.gov/files/company_tickers_exchange.json"
+EDGAR_SHARES_FRAME_URL = "https://data.sec.gov/api/xbrl/frames/dei/EntityCommonStockSharesOutstanding/shares/{period}.json"
+EDGAR_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
 LISTED_EXCHANGES = ("Nasdaq", "NYSE")
 
 # Lines in a run's output that mean "check this number by hand".
@@ -60,6 +68,7 @@ WARNING_PATTERNS = [
     (r"ANNUALIZED from", "annualized (no 10-K yet)"),
     (r"lags the company's latest annual report|hasn't caught up", "SEC data lags filing"),
     (r"capped at 0-100%", "payout capped"),
+    (r"far from its typical", "one-time quarter normalized"),
     (r"Base-year FCFF is NEGATIVE", "negative cash flow"),
     (r"growth is destroying value|below the cost of capital", "returns below cost of capital"),
 ]
@@ -101,6 +110,64 @@ def sector_universe(sector):
             seen.add(row[0])
             unique.append(row)
     return unique
+
+
+def _recent_quarters(n=3):
+    """The last n calendar quarters as SEC frame names, newest first (CY2026Q3I...)."""
+    y, q = date.today().year, (date.today().month - 1) // 3 + 1
+    out = []
+    for _ in range(n):
+        q -= 1
+        if q == 0:
+            y, q = y - 1, 4
+        out.append(f"CY{y}Q{q}I")
+    return out
+
+
+def cap_universe(spec):
+    """[(ticker, cik, name, sic)] for Nasdaq/NYSE companies whose market cap
+    (latest cover-page share count from SEC x Yahoo's last close) is in the
+    sector's range, minus the excluded SIC codes. One SEC file gives every
+    company's share count; Yahoo prices come in batches."""
+    import yfinance as yf
+    listed = {}
+    for cik, name, ticker, exchange in json.loads(_get(EDGAR_TICKERS_URL))["data"]:
+        if exchange in LISTED_EXCHANGES and ticker and "-" not in ticker:
+            listed.setdefault(int(cik), (ticker, name))
+    shares = {}
+    for period in reversed(_recent_quarters()):  # newest overwrites older
+        try:
+            for row in json.loads(_get(EDGAR_SHARES_FRAME_URL.format(period=period)))["data"]:
+                shares[int(row["cik"])] = row["val"]
+        except Exception:
+            pass
+    candidates = {cik: v for cik, v in listed.items() if cik in shares}
+    tickers = [t for t, _ in candidates.values()]
+    prices = {}
+    for i in range(0, len(tickers), 400):
+        batch = tickers[i:i + 400]
+        try:
+            close = yf.download(batch, period="5d", progress=False, auto_adjust=True)["Close"]
+            last = close.ffill().iloc[-1]
+            prices.update({t: float(last[t]) for t in batch if t in last and last[t] == last[t]})
+        except Exception:
+            pass
+    in_range = []
+    for cik, (ticker, name) in candidates.items():
+        price = prices.get(ticker)
+        if price and spec["min_cap"] <= price * shares[cik] <= spec["max_cap"]:
+            in_range.append((ticker, cik, name))
+    found = []
+    lo, hi = spec.get("exclude_sic", (0, -1))
+    for ticker, cik, name in in_range:
+        try:
+            sic = int(json.loads(_get(EDGAR_SUBMISSIONS_URL.format(cik=cik))).get("sic") or 0)
+        except Exception:
+            sic = 0
+        time.sleep(0.12)  # SEC asks for no more than 10 requests a second
+        if not lo <= sic <= hi:
+            found.append((ticker, cik, name, sic))
+    return found
 
 
 def market_cap(ticker):
@@ -202,8 +269,12 @@ def main():
 
     spec = SECTORS[args.sector]
     print(f"Finding {args.sector}: {spec['about']}...")
-    universe = sector_universe(args.sector)
-    print(f"  {len(universe)} listed companies under SIC {', '.join(map(str, spec['sic']))}")
+    if spec.get("universe") == "cap":
+        universe = cap_universe(spec)
+        print(f"  {len(universe)} listed companies from ${spec['min_cap']:,.0f} to ${spec['max_cap']:,.0f}")
+    else:
+        universe = sector_universe(args.sector)
+        print(f"  {len(universe)} listed companies under SIC {', '.join(map(str, spec['sic']))}")
     valuation.load_damodaran_data()  # warm the cache once, before the workers start
 
     if args.min_cap or args.max_cap != float("inf"):
