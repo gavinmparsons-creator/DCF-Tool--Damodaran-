@@ -21,6 +21,7 @@ python3 valuation.py ARM --narrative
    - A full equity bridge (minority interests, equity stakes, pensions, dilution).
    - A failure probability taken from bond-rating default rates.
 4. **Values the company several ways and shows what the price implies.** The market-implied growth rate, EV/revenue multiple, return on equity or full-output revenue, depending on the model.
+5. **Refuses to value the wrong thing.** A ticker that's a bond, note or preferred share (Entergy Arkansas's 4.875% bonds trade as `EAI`) stops with a message instead of a meaningless valuation.
 
 ## Models
 
@@ -40,18 +41,21 @@ Modes combine, e.g. `--narrative --cyclical` or `--biotech --narrative`.
 
 ## Beyond one valuation
 
-Three tools build on `valuation.py` for finding and tracking ideas:
+Five tools build on `valuation.py` for finding and tracking ideas:
 
 | Tool | What it does |
 |---|---|
-| `report.py TICKER` | A one-command company report. It runs the tool once on defaults, picking bank, REIT, cyclical or standard mode from the SEC industry code, and writes `reports/<TICKER>_<date>.md` with four sections:<br>1. **The record:** revenue, growth, cycle margins, return on capital.<br>2. **What the price implies:** the growth it needs at today's, cycle-average and industry margins, and the margin it needs at the company's own growth.<br>3. **A growth × margin grid** of values per share, including what a lasting competitive edge is worth.<br>4. **Every data warning.** |
-| `screener.py SECTOR` | Values every listed company in a sector non-interactively and ranks them, with each run's data warnings. Sectors:<br>• `banks`: excess return model.<br>• `builders`: homebuilders and land developers.<br>• `smallcap`: every operating company from $300M to $2B.<br>For builders and small caps it also reports a **record value** (what the company is worth if it keeps its own 5-year growth at today's margin) and the growth the price needs against the growth it delivered. `--answer "PROMPT=VALUE"` overrides a default across the whole screen. |
-| `digest.py SCREEN.csv` | Turns a screen into a short brief:<br>• top ideas, which must have clean data, a positive margin, and a record value 1.2x–10x the price;<br>• the most demanding prices: the widest gap between the growth needed and the growth delivered.<br>`--reports N` adds a full report on each of the top N. |
+| `report.py TICKER` | A one-command company report. It runs the tool once on defaults, picking bank, REIT, utility, cyclical or standard mode from the SEC industry code (a utility-coded company that doesn't act like one, such as a retail energy seller, falls back to standard), and writes `reports/<TICKER>_<date>.md` with four sections:<br>1. **The record:** revenue, growth, cycle margins, return on capital.<br>2. **What the price implies:** the growth it needs at today's, cycle-average and industry margins, and the margin it needs at the company's own growth.<br>3. **A growth × margin grid** of values per share, including what a lasting competitive edge is worth.<br>4. **Every data warning.** |
+| `screener.py SECTOR` | Values every listed company in a sector non-interactively and ranks them, with each run's data warnings. Sectors:<br>• `banks`: excess return model.<br>• `utilities`: regulated utilities on the dividend model; merchant generators on the standard model.<br>• `builders`: homebuilders and land developers.<br>• `smallcap`: every operating company from $300M to $2B.<br>• `nuclear`: a hand-picked theme (utilities with reactors, uranium, fuel, reactor suppliers, pre-revenue developers), each group in its own model; companies with no profits yet get a cash-runway view.<br>• `industries --industries NAME...`: any Damodaran industries from `sectors.py`.<br>• `tickers --tickers A B C`, `--tickers-file`, or `--earnings YYYY-MM-DD` (every company reporting that day).<br>For operating companies it also reports a **record value** (what the company is worth if it keeps its own 5-year growth at today's margin) and the growth the price needs against the growth it delivered. `--answer "PROMPT=VALUE"` overrides a default across the whole screen. |
+| `digest.py SCREEN.csv` | Turns a screen into a short brief:<br>• top ideas, which must have clean data, a positive margin, and a record value 1.2x–10x the price;<br>• the most demanding prices: the widest gap between the growth needed and the growth delivered;<br>• for theme screens, a cash-runway table and a table per group.<br>`--reports N` adds a full report on each of the top N. |
+| `sectors.py` | Every listed company worth $300M+ by Damodaran industry and size band, to choose what to screen next. |
 | `journal.py` | A decision journal. Record every buy, pass or watch with the price, your thesis and the model's value, then score each against simply owning the S&P 500 (SPY) over the same days. A pass scores when the stock then lagged. |
 
 ```bash
 python3 report.py NPB
 python3 screener.py smallcap --workers 6
+python3 screener.py tickers --earnings 2026-11-12
+python3 valuation.py DUK --utility
 python3 digest.py screens/smallcap_2026-11-07.csv --reports 5
 python3 journal.py add NPB watch "Mortgage-warehouse lender at 0.9x book; brokered funding is the risk"
 python3 journal.py show
