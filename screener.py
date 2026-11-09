@@ -53,6 +53,11 @@ SECTORS = {
     # are left out — they need bank or REIT mode.
     # Any Damodaran industries from the sector map (python3 sectors.py first),
     # named with --industries: e.g. Machinery "Restaurant/Dining".
+    # Any list of tickers (--tickers, or --tickers-file with one per line, e.g.
+    # an earnings calendar); each company's mode comes from its SEC code.
+    "tickers": {"universe": "list", "flags": {"insight": True},
+                "about": "the tickers given, each valued in the mode its SEC industry code suggests",
+                "needs": {"revenue", "operating_income", "cash", "shares_outstanding", "book_equity"}},
     "industries": {"universe": "sector_map", "flags": {"insight": True},
                    "about": "the industries named with --industries, from the sector map (sectors.py)",
                    "needs": {"revenue", "operating_income", "cash", "shares_outstanding", "book_equity"}},
@@ -382,6 +387,10 @@ def main():
     parser.add_argument("--max-cap", type=float, default=float("inf"), help="maximum market cap (e.g. 5e9)")
     parser.add_argument("--limit", type=int, help="value only the first N companies (a quick test)")
     parser.add_argument("--workers", type=int, default=4, help="companies valued at once (default 4)")
+    parser.add_argument("--tickers", nargs="+", default=[], metavar="TICKER", help="for 'tickers'")
+    parser.add_argument("--tickers-file", help="for 'tickers': a file with one ticker per line (or a CSV whose "
+                                               "first column is the ticker)")
+    parser.add_argument("--label", help="name for the results file (default: the sector)")
     parser.add_argument("--industries", nargs="+", default=[], metavar="NAME",
                         help="for 'industries': Damodaran industry names from sectors.py's table")
     parser.add_argument("--answer", action="append", default=[], metavar="PROMPT=VALUE",
@@ -391,7 +400,7 @@ def main():
 
     spec = SECTORS[args.sector]
     print(f"Finding {args.sector}: {spec['about']}...")
-    label = args.sector
+    label = args.label or args.sector
     if spec.get("universe") == "sector_map":
         import glob
         maps = sorted(glob.glob(os.path.join(SCREEN_DIR, "sectors_*.csv")))
@@ -403,6 +412,18 @@ def main():
                         if r["industry"].lower() in wanted]
         label = "_".join(re.sub(r"[^a-z]+", "", n.lower())[:12] for n in args.industries)
         print(f"  {len(universe)} companies in {', '.join(args.industries)} (from {os.path.basename(maps[-1])})")
+    elif spec.get("universe") == "list":
+        tickers = [t.upper() for t in args.tickers]
+        if args.tickers_file:
+            with open(args.tickers_file) as f:
+                for i, row in enumerate(csv.reader(f)):
+                    if row and row[0].strip() and not (i == 0 and row[0].strip().lower() in ("symbol", "ticker")):
+                        tickers.append(row[0].strip().upper())
+        listed = {t: (int(cik), name) for cik, name, t, _ex in json.loads(_get(EDGAR_TICKERS_URL))["data"] if t}
+        known = [t for t in dict.fromkeys(tickers) if t in listed]
+        codes = industry_codes([listed[t][0] for t in known])
+        universe = [(t, listed[t][0], listed[t][1], codes[listed[t][0]]) for t in known]
+        print(f"  {len(universe)} of {len(set(tickers))} tickers found on EDGAR")
     elif spec.get("universe") == "cap":
         # The universe takes ~15 minutes to build (SEC's rate limit on the
         # industry-code lookups), so it's saved for the day and reused.
@@ -439,7 +460,15 @@ def main():
     print(f"Valuing {len(universe)} companies ({args.workers} at a time; each takes ~20-60 seconds)...")
     with multiprocessing.Pool(args.workers) as pool:
         answers = [tuple(a.split("=", 1)) for a in args.answer]
-        jobs = [(t, spec["flags"], spec["needs"], log_dir, answers) for t, _, _, _ in universe]
+        def flags_for(sic):
+            # A list mixes industries: banks and REITs need their own models.
+            if spec.get("universe") == "list":
+                if 6020 <= sic <= 6039 or sic == 6211:
+                    return {"financial": True}, SECTORS["banks"]["needs"]
+                if sic == 6798:
+                    return {"reit": True}, spec["needs"]
+            return spec["flags"], spec["needs"]
+        jobs = [(t, *flags_for(sic), log_dir, answers) for t, _, _, sic in universe]
         for i, row in enumerate(pool.imap_unordered(value_one, jobs), start=1):
             row["name"], row["sic"] = names[row["ticker"]]
             rows.append(row)
