@@ -77,7 +77,7 @@ LISTED_EXCHANGES = ("Nasdaq", "NYSE")
 WARNING_PATTERNS = [
     (r"tagged in thousands or millions", "share count re-scaled"),
     (r"ANNUALIZED from", "annualized (no 10-K yet)"),
-    (r"lags the company's latest annual report|hasn't caught up", "SEC data lags filing"),
+    (r"lags the company's latest annual report|hasn't caught up|EDGAR's data is behind", "SEC data lags filing"),
     (r"capped at 0-100%", "payout capped"),
     (r"far from its typical", "one-time quarter normalized"),
     (r"Base-year FCFF is NEGATIVE", "negative cash flow"),

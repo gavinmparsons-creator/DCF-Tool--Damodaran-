@@ -235,7 +235,9 @@ def company_report(ticker):
     lines += ["## 1. The record", ""]
     if revenue:
         lines += ["| Year | Revenue |", "|---|---|"] + [
-            f"| FY{e['fiscal_year']} | ${e['val'] / 1e9:,.2f}B |" for e in revenue] + [""]
+            f"| FY{e['fiscal_year']} | {'$' if e['unit'] == 'USD' else e['unit'] + ' '}{e['val'] / 1e9:,.2f}B |"
+            for e in revenue] + ([""] if revenue[-1]["unit"] == "USD" else
+                                 ["", f"*Revenue as filed, in {revenue[-1]['unit']}; the valuation converts to USD.*", ""])
     last_year = (revenue[-1]["val"] / revenue[-2]["val"] - 1
                  if len(revenue) >= 2 and revenue[-2]["val"] > 0 else None)
     ytd, ytd_label = valuation.year_to_date_growth(facts, [t for t in valuation.METRIC_TAGS["revenue"]
