@@ -61,11 +61,38 @@ SECTORS = {
     "industries": {"universe": "sector_map", "flags": {"insight": True},
                    "about": "the industries named with --industries, from the sector map (sectors.py)",
                    "needs": {"revenue", "operating_income", "cash", "shares_outstanding", "book_equity"}},
+    # Hand-picked cross-industry themes (THEMES below), each group in its own mode.
+    "nuclear": {"universe": "theme", "flags": {"insight": True},
+                "about": "nuclear power and adjacent: utilities with reactors, uranium, fuel, reactor "
+                         "suppliers, and pre-revenue developers",
+                "needs": {"revenue", "operating_income", "cash", "shares_outstanding", "book_equity"}},
     "smallcap": {"universe": "cap", "min_cap": 3e8, "max_cap": 2e9, "exclude_sic": (6000, 6999),
                  "flags": {"insight": True},
                  "about": "listed operating companies from $300M to $2B, excluding financials and REITs",
                  "needs": {"revenue", "operating_income", "cash", "shares_outstanding", "book_equity"}},
 }
+# Hand-picked themes that cut across SEC industry codes. Each group is
+# valued the way its businesses work: "standard" (the narrative record
+# view), "cyclical" (cycle-average margins, for commodity producers), or
+# "runway" (no revenue to value yet: cash, burn, and years of runway).
+THEMES = {
+    "nuclear": {
+        "Utilities & generators with nuclear fleets": {
+            "mode": "standard",
+            "tickers": ["CEG", "VST", "TLN", "PEG", "D", "DUK", "SO", "ETR", "PCG", "NEE", "XEL", "AEE",
+                        "EVRG", "PNW"]},
+        "Uranium producers & royalties": {"mode": "cyclical", "tickers": ["CCJ", "UROY"]},
+        # Producing, but still losing money as mines ramp up: a margin-based
+        # value is negative, so they're read like the developers.
+        "Uranium miners ramping up (loss-making)": {"mode": "runway", "tickers": ["UEC", "UUUU", "URG", "EU"]},
+        "Fuel cycle & enrichment": {"mode": "standard", "tickers": ["LEU", "ASPI"]},
+        "Reactor components, engineering & services": {
+            "mode": "standard", "tickers": ["BWXT", "CW", "GEV", "FLR", "MIR", "GHM", "J"]},
+        "Pre-revenue reactor developers & uranium projects": {
+            "mode": "runway", "tickers": ["OKLO", "SMR", "NNE", "LTBR", "IMSR", "FRMI", "NXE", "DNN"]},
+    },
+}
+
 EDGAR_SIC_URL = ("https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&SIC={sic}&type=10-K"
                  "&dateb=&owner=include&count=100&start={start}&output=atom")
 EDGAR_TICKERS_URL = "https://www.sec.gov/files/company_tickers_exchange.json"
@@ -351,12 +378,60 @@ def insight_one(ticker, flags, needs, log_dir):
     return row
 
 
+def runway_one(ticker, log_dir):
+    """A pre-revenue company has no earnings to discount: report what the
+    price is paying for (enterprise value) against what the company has
+    (cash) and spends (operating cash flow + capex, trailing twelve months
+    where a 10-Q is newer), and how many years the cash lasts at that rate."""
+    row = {"ticker": ticker}
+    notes = []
+    try:
+        cik, _ = valuation.get_cik_for_ticker(ticker)
+        facts = valuation.fetch_json(valuation.EDGAR_FACTS_URL.format(cik=cik))
+
+        def usd(value, unit):
+            if value is None or unit in (None, "USD"):
+                return value
+            return value * valuation.get_fx_rate_to_usd(unit)[0]
+
+        cash, _, _, unit = valuation.freshest_instant(facts, valuation.METRIC_TAGS["cash"])
+        invest, _, _, i_unit = valuation.freshest_instant(facts, valuation.SHORT_TERM_INVESTMENT_TAGS)
+        debt_tags = [t for t in valuation.TOTAL_DEBT_TAGS if isinstance(t, str)]
+        debt, _, _, d_unit = valuation.freshest_instant(facts, debt_tags)
+        ocf, _, _, o_unit, ocf_asof = valuation.freshest_ttm(facts, valuation.OPERATING_CASH_FLOW_TAGS)
+        capex, _, _, c_unit, _ = valuation.freshest_ttm(
+            facts, [t for t in valuation.METRIC_TAGS["capex"] if isinstance(t, str)])
+        cash_total = (usd(cash, unit) or 0) + (usd(invest, i_unit) or 0)
+        spend = (usd(ocf, o_unit) or 0) - abs(usd(capex, c_unit) or 0)
+        row["cash"] = cash_total
+        row["debt"] = usd(debt, d_unit) or 0
+        row["burn"] = -spend if spend < 0 else 0.0
+        row["runway_years"] = cash_total / row["burn"] if row["burn"] > 0 else None
+        if ocf is None:
+            notes.append("no operating cash flow found")
+        row["market_cap"] = market_cap(ticker)
+        price = valuation.yahoo_last_close(ticker) if hasattr(valuation, "yahoo_last_close") else None
+        row["price"] = price
+        if row["market_cap"]:
+            row["ev"] = row["market_cap"] + row["debt"] - cash_total
+            row["ev_to_cash"] = row["ev"] / cash_total if cash_total else None
+    except BaseException as e:
+        row["error"] = f"{type(e).__name__}: {e}"[:160]
+    row["warnings"] = "; ".join(notes)
+    os.makedirs(log_dir, exist_ok=True)
+    with open(os.path.join(log_dir, f"{ticker}.log"), "w") as f:
+        f.write(json.dumps({k: v for k, v in row.items()}, indent=1, default=str))
+    return row
+
+
 def value_one(args):
     """Run valuation.py on one ticker with every default accepted. Returns a
     result row (dict). Runs in a worker process: its own saved-choice
     files, so parallel runs can't overwrite each other's industry picks."""
     ticker, flags, needs, log_dir, answers = args
     valuation.SKIP_IMPLIED_VOLATILITY = True
+    if flags.get("runway"):
+        return runway_one(ticker, log_dir)
     if flags.get("insight"):
         return insight_one(ticker, {k: v for k, v in flags.items() if k != "insight"}, needs, log_dir)
     work = tempfile.mkdtemp()
@@ -426,6 +501,7 @@ def main():
     spec = SECTORS[args.sector]
     print(f"Finding {args.sector}: {spec['about']}...")
     label = args.label or args.sector
+    group_of = {}
     if spec.get("universe") == "sector_map":
         import glob
         maps = sorted(glob.glob(os.path.join(SCREEN_DIR, "sectors_*.csv")))
@@ -458,6 +534,19 @@ def main():
         codes = industry_codes([listed[t][0] for t in known])
         universe = [(t, listed[t][0], listed[t][1], codes[listed[t][0]]) for t in known]
         print(f"  {len(universe)} of {len(set(tickers))} tickers found on EDGAR")
+    elif spec.get("universe") == "theme":
+        exchange_data = json.loads(_get(EDGAR_TICKERS_URL))["data"]
+        listed = {t: (int(cik), name) for cik, name, t, _ex in exchange_data if t}
+        universe, missing = [], []
+        for group, g in THEMES[args.sector].items():
+            for t in g["tickers"]:
+                if t in listed:
+                    universe.append((t, listed[t][0], listed[t][1], 0))
+                    group_of[t] = (group, g["mode"])
+                else:
+                    missing.append(t)
+        print(f"  {len(universe)} companies in {len(THEMES[args.sector])} groups"
+              + (f" (not on EDGAR, skipped: {', '.join(missing)})" if missing else ""))
     elif spec.get("universe") == "cap":
         # The universe takes ~15 minutes to build (SEC's rate limit on the
         # industry-code lookups), so it's saved for the day and reused.
@@ -502,11 +591,20 @@ def main():
                 if sic == 6798:
                     return {"reit": True}, spec["needs"]
             return spec["flags"], spec["needs"]
-        jobs = [(t, *flags_for(sic), log_dir, answers) for t, _, _, sic in universe]
+        def theme_flags(ticker):
+            mode = group_of[ticker][1]
+            if mode == "runway":
+                return {"runway": True}, spec["needs"]
+            return dict(spec["flags"], cyclical=mode == "cyclical"), spec["needs"]
+        jobs = [(t, *(theme_flags(t) if t in group_of else flags_for(sic)), log_dir, answers)
+                for t, _, _, sic in universe]
         for i, row in enumerate(pool.imap_unordered(value_one, jobs), start=1):
             row["name"], row["sic"] = names[row["ticker"]]
+            if row["ticker"] in group_of:
+                row["group"] = group_of[row["ticker"]][0]
             rows.append(row)
-            status = (f"{row['record_to_price']:.2f}x record" if row.get("record_to_price") is not None else
+            status = (f"{row['runway_years']:.1f} yrs runway" if row.get("runway_years") is not None else
+                      f"{row['record_to_price']:.2f}x record" if row.get("record_to_price") is not None else
                       f"{row['value_to_price']:.2f}x" if row.get("value_to_price") else
                       row.get("error", "no value")[:60])
             print(f"  [{i}/{len(universe)}] {row['ticker']:<6} {status}", flush=True)
@@ -515,10 +613,14 @@ def main():
     rows.sort(key=lambda r: r.get(rank_by) if r.get(rank_by) is not None else -1e9, reverse=True)
     os.makedirs(SCREEN_DIR, exist_ok=True)
     path = os.path.join(SCREEN_DIR, f"{label}_{date.today().isoformat()}.csv")
-    fields = ["ticker", "name", "sic", "market_cap", "price", "low", "base", "high", "value_to_price",
+    if group_of:  # keep each theme group together, in the order THEMES lists them
+        order = {g: i for i, g in enumerate(THEMES[args.sector])}
+        rows.sort(key=lambda r: order.get(r.get("group"), 99))
+    fields = ["ticker", "name", "group", "sic", "market_cap", "price", "low", "base", "high", "value_to_price",
               "record_value", "record_to_price", "hist_growth", "implied_growth", "expectations_gap", "margin_now",
               "price_implies",
-              "roe", "stable_roe", "cost_of_equity", "wacc", "book_equity", "warnings", "error"]
+              "roe", "stable_roe", "cost_of_equity", "wacc", "book_equity",
+              "cash", "debt", "burn", "runway_years", "ev", "ev_to_cash", "warnings", "error"]
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()

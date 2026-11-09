@@ -96,6 +96,40 @@ def main():
                          f"{fmt_pct(num(r.get('hist_growth')))} | {fmt_pct(num(r.get('implied_growth')))} | "
                          f"{num(r[key]):.2f}x |")
 
+    runway = [r for r in rows if num(r.get("runway_years")) is not None or num(r.get("burn")) is not None]
+    if runway:
+        runway.sort(key=lambda r: num(r.get("runway_years")) if num(r.get("runway_years")) is not None else 1e9)
+        lines += ["", "## Pre-revenue: what the price pays for", "",
+                  "No earnings to discount yet. Enterprise value is what the market pays for the story beyond the "
+                  "cash in hand; runway is how long that cash lasts at the trailing year's spending (operating cash "
+                  "flow plus capex). Under two years means more shares or debt are coming.", "",
+                  "| Ticker | Company | Market cap | Cash | Burn / yr | Runway | EV beyond cash |",
+                  "|---|---|---|---|---|---|---|"]
+        bn = lambda x: "" if x is None else f"${x / 1e9:,.2f}B"
+        for r in runway:
+            years = num(r.get("runway_years"))
+            lines.append(f"| {r['ticker']} | {(r.get('name') or '')[:32].title()} | {bn(num(r.get('market_cap')))} | "
+                         f"{bn(num(r.get('cash')))} | {bn(num(r.get('burn')))} | "
+                         f"{'cash-flow positive' if years is None else f'{years:.1f} yrs'} | {bn(num(r.get('ev')))} |")
+
+    if any(r.get("group") for r in rows):
+        lines += ["", "## Every company by group", ""]
+        for group in dict.fromkeys(r.get("group") for r in rows if r.get("group")):
+            if all(num(r.get("burn")) is not None for r in rows if r.get("group") == group):
+                continue  # pre-revenue groups are in the table above
+            lines += [f"**{group}**", "", "| Ticker | Price | Record / price | Grew | Price needs | Margin | Warnings |",
+                      "|---|---|---|---|---|---|---|"]
+            for r in [r for r in rows if r.get("group") == group and num(r.get("runway_years")) is None
+                      and num(r.get("burn")) is None]:
+                rp = num(r.get(key))
+                implied = num(r.get("implied_growth"))
+                price = num(r.get("price"))
+                lines.append(f"| {r['ticker']} | {'' if price is None else f'${price:,.2f}'} | "
+                             f"{'' if rp is None else f'{rp:.2f}x'} | {fmt_pct(num(r.get('hist_growth')))} | "
+                             f"{fmt_pct(implied)} | {fmt_pct(num(r.get('margin_now')))} | "
+                             f"{r.get('warnings') or r.get('error') or ''} |")
+            lines.append("")
+
     dropped = len(valued) - len([r for r in valued if clean(r)])
     lines += ["", f"*{dropped} valued rows were left out for data warnings (stale or missing figures, a share count "
               "far from the market's, negative cash flow). Their logs are in screens/logs/.*", ""]
