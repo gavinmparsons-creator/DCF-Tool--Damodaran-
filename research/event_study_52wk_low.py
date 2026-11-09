@@ -39,7 +39,7 @@ KNOWN BIASES (not fixable with free data — interpret accordingly)
   * ADR share counts are in ordinary shares, which can overstate an ADR's
     market cap and admit a few sub-$2B ADRs. Small effect on the study.
 
-USAGE (from the dcf-tool folder):
+USAGE (from the tool's folder):
     python3 research/event_study_52wk_low.py            # builds/uses cached data in research/data/
     python3 research/event_study_52wk_low.py --rebuild  # re-download the universe and prices
 """

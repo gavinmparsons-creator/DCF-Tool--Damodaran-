@@ -11,7 +11,7 @@ problem. The digest keeps the rows worth a human's time:
     needs and the growth the company has delivered.
   * With --reports N, a full report.py report on each of the top N.
 
-USAGE (from the dcf-tool folder):
+USAGE (from the tool's folder):
     python3 digest.py screens/smallcap_2026-11-07.csv
     python3 digest.py screens/smallcap_2026-11-07.csv --reports 5
 

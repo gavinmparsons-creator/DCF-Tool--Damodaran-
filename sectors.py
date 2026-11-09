@@ -7,7 +7,7 @@ counts companies and market value per industry. The industry codes are
 kept for good (screens/sic_codes.json), so only the first run is slow
 (~15 minutes at SEC's request limit).
 
-USAGE (from the dcf-tool folder):
+USAGE (from the tool's folder):
     python3 sectors.py                 # the table, largest industries first
     python3 sectors.py --by count      # most companies first
 

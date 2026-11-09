@@ -1,4 +1,4 @@
-# dcf-tool
+# DCF Tool (Damodaran)
 
 A command-line valuation tool that pulls a public company's financials straight from SEC EDGAR and values it the way Aswath Damodaran teaches: a DCF built from the company's own filings, his industry data, and an explicit story about growth, margins, reinvestment and risk.
 
@@ -81,8 +81,8 @@ The point isn't the single number. It's seeing exactly which story the price req
 Requires Python 3.9+. Market data comes from [yfinance](https://pypi.org/project/yfinance/):
 
 ```bash
-git clone https://github.com/gavinmparsons-creator/DCF-Tool--Damodaran-.git dcf-tool
-cd dcf-tool
+git clone https://github.com/gavinmparsons-creator/DCF-Tool--Damodaran-.git
+cd DCF-Tool--Damodaran-
 pip install yfinance
 python3 valuation.py AAPL
 ```

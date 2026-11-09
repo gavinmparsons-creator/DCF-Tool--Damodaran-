@@ -7,7 +7,7 @@ made at the time — the price, what you believed, and what the model said —
 checked later against an index fund over the same days. Passes count too:
 a stock you passed on that then doubled is as informative as a winner.
 
-USAGE (from the dcf-tool folder):
+USAGE (from the tool's folder):
     python3 journal.py add NPB buy "MPP lender at 0.9x book earning 14%; margin compression is the risk"
     python3 journal.py add KO pass "Price needs 30%+ growth; record is 5%" --value 41.67
     python3 journal.py show                 # every entry vs SPY since its date

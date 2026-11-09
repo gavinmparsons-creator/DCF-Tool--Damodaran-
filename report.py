@@ -19,7 +19,7 @@ Banks and brokers get the excess return model instead (--financial), REITs
 the dividend model (--reit). Pre-production companies still need
 valuation.py --project with the technical report's numbers.
 
-USAGE (from the dcf-tool folder):
+USAGE (from the tool's folder):
     python3 report.py NVDA
     python3 report.py KO PEP          # several, one report each
 

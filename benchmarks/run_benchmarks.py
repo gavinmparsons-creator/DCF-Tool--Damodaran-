@@ -10,7 +10,7 @@ fixtures/<TICKER>.json.gz on --refresh and REPLAYED otherwise, so a normal
 run sees exactly the same inputs every time — the only thing that can move
 a number is a code change. Results are compared against baseline.json.
 
-USAGE (from the dcf-tool folder):
+USAGE (from the tool's folder):
     python3 benchmarks/run_benchmarks.py                    # replay saved data, compare to baseline
     python3 benchmarks/run_benchmarks.py --only AAPL DOW     # just some companies
     python3 benchmarks/run_benchmarks.py --refresh           # pull live data, save it as the new snapshot

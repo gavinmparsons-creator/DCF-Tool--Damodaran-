@@ -9,7 +9,7 @@ idea generator, not a verdict: defaults can't see what you know, and a
 stock that looks cheap is often cheap for a reason. Every row carries the
 data warnings from its run, so you can see which numbers to distrust.
 
-USAGE (from the dcf-tool folder):
+USAGE (from the tool's folder):
     python3 screener.py banks                      # regional banks, any size
     python3 screener.py builders --max-cap 5e9     # homebuilders under $5B
     python3 screener.py banks --limit 20           # quick test on 20 names
