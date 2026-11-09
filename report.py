@@ -177,10 +177,24 @@ def company_report(ticker):
              f"*Report of {date.today().isoformat()} from the DCF tool on its defaults — "
              f"SEC industry code {sic}, valued as **{mode}**. Not investment advice.*", ""]
 
+    summary = text = None
+    if mode == "utility":
+        summary, text, _ = run_capture(ticker, {"utility": True}, lambda p, _t: "")
+        u = summary.get("utility") or {}
+        if u.get("not_a_payer") or (u.get("roe") or 0) > 0.15:
+            # Files as a utility but isn't run like one (Genie Energy: a retail
+            # energy seller earning 28% on equity in the 2022-24 price spike).
+            why = ("pays little or no dividend" if u.get("not_a_payer") else
+                   f"earns {u['roe']:.0%} on equity, far above a regulated return")
+            lines[-2] += (f" Files under a utility code but {why}, so it's valued on the standard "
+                          "model instead of the utility dividend model.")
+            lines[-2] = lines[-2].replace("valued as **utility**", "valued as **standard**")
+            mode = "standard"
     if mode in ("bank", "reit", "utility"):
         flags = {"bank": {"financial": True}, "reit": {"reit": True}, "utility": {"utility": True}}[mode]
         answers = (lambda p, _t: "0.76" if "type a beta to use as is" in p else "")
-        summary, text, _ = run_capture(ticker, flags, answers)
+        if summary is None:
+            summary, text, _ = run_capture(ticker, flags, answers)
         price = summary.get("share_price") or _num(r"Current market price: \$([\d,]+\.?\d*)", text) \
             or _num(r"share price=\$([\d,]+\.?\d*)", text)
         warnings, _cap = screener.run_warnings(text, {"book_equity", "shares_outstanding"}, ticker, price)
