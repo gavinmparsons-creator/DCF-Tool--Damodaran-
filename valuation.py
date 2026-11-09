@@ -4618,6 +4618,10 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
             if payout is not None and abs(payout - median_payout) > 0.15:
                 print(f"  Payout: latest {payout:.0%}, median of {len(payouts)} years {median_payout:.0%} — using the median.")
                 payout = median_payout
+        if roe is not None and roe > 0.15:
+            print(f"  ⚠ ROE above the regulated range: {roe:.1%} is well over the 9-11% regulators allow,")
+            print("    so unregulated businesses (retail energy, manufacturing, propane) are likely driving")
+            print("    earnings, and growth from retention x ROE will overstate the value.")
         if eps <= 0 or roe is None or payout is None or roe <= 0:
             print("  ⚠ Earnings or book equity isn't positive — the dividend model can't run on these figures.")
         elif payout < 0.20:

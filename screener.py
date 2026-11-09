@@ -117,6 +117,7 @@ WARNING_PATTERNS = [
     (r"ANNUALIZED from", "annualized (no 10-K yet)"),
     (r"lags the company's latest annual report|hasn't caught up|EDGAR's data is behind", "SEC data lags filing"),
     (r"capped at 0-100%", "payout capped"),
+    (r"ROE above the regulated range", "ROE above regulated range (unregulated businesses?)"),
     (r"far from its typical", "one-time quarter normalized"),
     (r"Base-year FCFF is NEGATIVE", "negative cash flow"),
     (r"growth is destroying value|below the cost of capital", "returns below cost of capital"),
