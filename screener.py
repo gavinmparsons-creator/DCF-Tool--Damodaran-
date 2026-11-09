@@ -125,11 +125,10 @@ def _recent_quarters(n=3):
     return out
 
 
-def cap_universe(spec):
-    """[(ticker, cik, name, sic)] for Nasdaq/NYSE companies whose market cap
-    (latest cover-page share count from SEC x Yahoo's last close) is in the
-    sector's range, minus the excluded SIC codes. One SEC file gives every
-    company's share count; Yahoo prices come in batches."""
+def listed_market_caps():
+    """{cik: (ticker, name, market cap)} for every Nasdaq/NYSE company with a
+    cover-page share count: SEC's share counts for every filer (one frames
+    file) x Yahoo's last close (batches of 400)."""
     import yfinance as yf
     listed = {}
     for cik, name, ticker, exchange in json.loads(_get(EDGAR_TICKERS_URL))["data"]:
@@ -153,41 +152,48 @@ def cap_universe(spec):
             prices.update({t: float(last[t]) for t in batch if t in last and last[t] == last[t]})
         except Exception:
             pass
-    in_range = []
-    for cik, (ticker, name) in candidates.items():
-        price = prices.get(ticker)
-        if price and spec["min_cap"] <= price * shares[cik] <= spec["max_cap"]:
-            in_range.append((ticker, cik, name))
-    found = []
-    lo, hi = spec.get("exclude_sic", (0, -1))
-    # Industry codes almost never change, so each one found is kept for good
-    # (screens/sic_codes.json): only new companies cost a request next time.
+    return {cik: (ticker, name, prices[ticker] * shares[cik])
+            for cik, (ticker, name) in candidates.items() if prices.get(ticker)}
+
+
+def industry_codes(ciks):
+    """{cik: SEC industry (SIC) code, 0 if unknown}. Codes almost never
+    change, so each one found is kept for good (screens/sic_codes.json):
+    only new companies cost a request, paced to SEC's limit."""
     sic_cache_path = os.path.join(SCREEN_DIR, "sic_codes.json")
     try:
         with open(sic_cache_path) as f:
             sic_cache = json.load(f)
     except (OSError, ValueError):
         sic_cache = {}
-    todo = sum(str(cik) not in sic_cache for _, cik, _ in in_range)
-    print(f"  {len(in_range)} in the market-cap range; looking up {todo} new industry codes...", flush=True)
-    looked_up = 0
-    for ticker, cik, name in in_range:
-        if str(cik) not in sic_cache:
-            try:
-                sic_cache[str(cik)] = int(json.loads(_get(EDGAR_SUBMISSIONS_URL.format(cik=cik))).get("sic") or 0)
-            except Exception:
-                sic_cache[str(cik)] = 0
-            looked_up += 1
-            if looked_up % 200 == 0:
-                print(f"    {looked_up}/{todo}", flush=True)
-            time.sleep(0.12)  # SEC asks for no more than 10 requests a second
-        sic = sic_cache[str(cik)]
-        if not lo <= sic <= hi:
-            found.append((ticker, cik, name, sic))
+    todo = [cik for cik in ciks if str(cik) not in sic_cache]
+    print(f"  looking up {len(todo)} new industry codes ({len(ciks) - len(todo)} known)...", flush=True)
+    for i, cik in enumerate(todo, start=1):
+        try:
+            sic_cache[str(cik)] = int(json.loads(_get(EDGAR_SUBMISSIONS_URL.format(cik=cik))).get("sic") or 0)
+        except Exception:
+            sic_cache[str(cik)] = 0
+        if i % 200 == 0:
+            print(f"    {i}/{len(todo)}", flush=True)
+            os.makedirs(SCREEN_DIR, exist_ok=True)
+            with open(sic_cache_path, "w") as f:  # save as it goes, so an interrupted run isn't wasted
+                json.dump(sic_cache, f)
+        time.sleep(0.12)  # SEC asks for no more than 10 requests a second
     os.makedirs(SCREEN_DIR, exist_ok=True)
     with open(sic_cache_path, "w") as f:
         json.dump(sic_cache, f)
-    return found
+    return {cik: sic_cache[str(cik)] for cik in ciks}
+
+
+def cap_universe(spec):
+    """[(ticker, cik, name, sic)] for Nasdaq/NYSE companies whose market cap
+    is in the sector's range, minus the excluded SIC codes."""
+    in_range = [(t, cik, n) for cik, (t, n, cap) in listed_market_caps().items()
+                if spec["min_cap"] <= cap <= spec["max_cap"]]
+    print(f"  {len(in_range)} in the market-cap range", flush=True)
+    codes = industry_codes([cik for _, cik, _ in in_range])
+    lo, hi = spec.get("exclude_sic", (0, -1))
+    return [(t, cik, n, codes[cik]) for t, cik, n in in_range if not lo <= codes[cik] <= hi]
 
 
 def market_cap(ticker):
