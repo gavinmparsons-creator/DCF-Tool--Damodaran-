@@ -47,15 +47,22 @@ REPORT_DIR = os.path.join(HERE, "reports")
 # average margin over the cycle (Damodaran), not the latest year.
 BANK_SIC = set(range(6020, 6040)) | {6211}
 REIT_SIC = {6798}
+# Regulated electric, gas and water utilities: the dividend model from
+# fundamentals. Merchant generators share code 4911 but sell power at
+# market prices and pay little out, so they stay on the standard model.
+UTILITY_SIC = {4911, 4924, 4931, 4932, 4939, 4941}
+MERCHANT_GENERATORS = {"CEG", "VST", "TLN", "NRG"}
 CYCLICAL_SIC = (list(range(1000, 1500)) + list(range(2800, 2830)) + list(range(2860, 2900))
                 + list(range(2900, 3000)) + list(range(3310, 3400)) + [1531, 1520, 6552]
                 + list(range(3711, 3717)) + list(range(4400, 4500)) + list(range(3530, 3540)))
 NEEDS = {"revenue", "operating_income", "cash", "shares_outstanding", "book_equity"}
 
 
-def pick_mode(cik):
+def pick_mode(cik, ticker=""):
     sic, _ = valuation.get_sic(cik)
     sic = int(sic) if sic else 0
+    if sic in UTILITY_SIC and ticker.upper() not in MERCHANT_GENERATORS:
+        return "utility", sic
     if sic in BANK_SIC:
         return "bank", sic
     if sic in REIT_SIC:
@@ -165,13 +172,13 @@ def history(facts):
 
 def company_report(ticker):
     cik, name = valuation.get_cik_for_ticker(ticker)
-    mode, sic = pick_mode(cik)
+    mode, sic = pick_mode(cik, ticker)
     lines = [f"# {name} ({ticker.upper()})", "",
              f"*Report of {date.today().isoformat()} from the DCF tool on its defaults — "
              f"SEC industry code {sic}, valued as **{mode}**. Not investment advice.*", ""]
 
-    if mode in ("bank", "reit"):
-        flags = {"financial": True} if mode == "bank" else {"reit": True}
+    if mode in ("bank", "reit", "utility"):
+        flags = {"bank": {"financial": True}, "reit": {"reit": True}, "utility": {"utility": True}}[mode]
         answers = (lambda p, _t: "0.76" if "type a beta to use as is" in p else "")
         summary, text, _ = run_capture(ticker, flags, answers)
         price = summary.get("share_price") or _num(r"Current market price: \$([\d,]+\.?\d*)", text) \
@@ -189,6 +196,23 @@ def company_report(ticker):
                       f"**{pct(implied)}**.", "",
                       "## Value (excess return model, money-center beta)", "",
                       f"Low {money(er.get('low'))} · **Base {money(er.get('base'))}** · High {money(er.get('high'))}", ""]
+        elif mode == "utility":
+            u, ddm = summary.get("utility", {}), summary.get("ddm", {})
+            dps, eps = u.get("dps"), u.get("eps")
+            lines += ["## The record", "",
+                      f"- Earnings per share {money(eps)}, dividend {money(dps)}"
+                      + (f" (yield {pct(dps / price)})" if dps and price else "")
+                      + f", payout {pct(u.get('payout'), 0)}",
+                      f"- Return on equity **{pct(u.get('roe'))}**; share count growing "
+                      f"{pct(u.get('dilution'))} a year",
+                      f"- Growth from fundamentals (retention x ROE): **{pct(u.get('fundamental_growth'))}**", "",
+                      "## Value (two-stage dividend model, Damodaran's ddm2st)", "",
+                      f"Low {money(ddm.get('low'))} · **Base {money(ddm.get('base'))}** · High {money(ddm.get('high'))}"
+                      + (f" ({ddm['base'] / price:.2f}x the price)" if ddm.get("base") and price else ""), "",
+                      f"The price implies **{pct(u.get('implied_growth'))}** earnings growth for five years, "
+                      f"against {pct(u.get('fundamental_growth'))} from fundamentals. Base case: cost of equity "
+                      "from a bottom-up utility beta, stable ROE at today's (regulators keep allowing it); "
+                      "low/high move the cost of equity 1 point and stable growth 0.5 points.", ""]
         else:
             ddm, nav = summary.get("ddm", {}), summary.get("nav_per_share")
             lines += ["## Value (REIT dividend model)", "",

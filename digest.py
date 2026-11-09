@@ -57,11 +57,19 @@ def main():
     name = os.path.splitext(os.path.basename(args.screen))[0]
     has_record = "record_to_price" in rows[0] and any(r.get("record_to_price") for r in rows)
     key = "record_to_price" if has_record else "value_to_price"
+    if has_record:
+        # A theme screen mixes models: a utility's dividend-model value stands in
+        # for the record value, and its fundamental growth for the record.
+        for r in rows:
+            if not r.get("record_to_price") and r.get("value_to_price") and r.get("group"):
+                r.update(record_to_price=r["value_to_price"], record_value=r["base"], model_value="1")
+                if r.get("implied_growth") and r.get("hist_growth"):
+                    r["expectations_gap"] = str(num(r["implied_growth"]) - num(r["hist_growth"]))
     valued = [r for r in rows if num(r.get(key)) is not None]
     # A margin over 90% means the revenue or EBIT figure is wrong, not that
     # the business is that good (Verra Mobility read 114%).
     ideas = [r for r in valued if clean(r) and 1.2 <= num(r[key]) < 10
-             and (not has_record or 0 < (num(r.get("margin_now")) or 0) <= 0.9)]
+             and (not has_record or r.get("model_value") or 0 < (num(r.get("margin_now")) or 0) <= 0.9)]
     ideas.sort(key=lambda r: num(r[key]), reverse=True)
 
     lines = [f"# Digest: {name}", "",
@@ -84,7 +92,8 @@ def main():
 
     if has_record:
         demanding = [r for r in valued if (num(r.get("expectations_gap")) or 0) > 0 and clean(r)
-                     and (num(r.get("margin_now")) or 0) > 0 and (num(r.get("price")) or 0) >= 1
+                     and (r.get("model_value") or (num(r.get("margin_now")) or 0) > 0)
+                     and (num(r.get("price")) or 0) >= 1
                      and (num(r.get("market_cap")) or 0) >= 1e8]
         demanding.sort(key=lambda r: num(r["expectations_gap"]), reverse=True)
         lines += ["", "## Most demanding prices", "",
@@ -117,7 +126,7 @@ def main():
         for group in dict.fromkeys(r.get("group") for r in rows if r.get("group")):
             if all(num(r.get("burn")) is not None for r in rows if r.get("group") == group):
                 continue  # pre-revenue groups are in the table above
-            lines += [f"**{group}**", "", "| Ticker | Price | Record / price | Grew | Price needs | Margin | Warnings |",
+            lines += [f"**{group}**", "", "| Ticker | Price | Value / price | Grew | Price needs | Margin | Warnings |",
                       "|---|---|---|---|---|---|---|"]
             for r in [r for r in rows if r.get("group") == group and num(r.get("runway_years")) is None
                       and num(r.get("burn")) is None]:

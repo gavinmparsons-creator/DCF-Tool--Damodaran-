@@ -3361,7 +3361,7 @@ def run_project_valuation(summary, facts, fx_currency, fx_rate, financials, book
 
 
 def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, reit=False,
-                       cyclical=False, financial=False, project=False):
+                       cyclical=False, financial=False, project=False, utility=False):
     """
     Interactive valuation of one company. Prints the full build, and
     returns a summary dict of the key inputs and results (beta, ERP, WACC,
@@ -4365,7 +4365,7 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     # The FCFF DCF above will read as near-worthless (base-year FCFF
     # near zero) even though the business is healthy; the DDM below
     # values what shareholders actually receive instead. ----
-    if not reit and reinvestment_rate is not None and reinvestment_rate >= 0.80:
+    if not reit and not utility and reinvestment_rate is not None and reinvestment_rate >= 0.80:
         latest_dps, div_growth, div_years, div_n, _dps_unit = trailing_dividend_growth_rate(facts)
         # A per-share unit is compound (e.g. "CNY/shares"), not a bare
         # currency code, so it can't be compared to fx_currency with
@@ -4546,6 +4546,85 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         print(f"  NAV per share: ${nav['nav_per_share']:,.2f}   vs current price ${share_price:,.2f}" +
               (f"  ({premium:+.0%} {'premium' if premium >= 0 else 'discount'} to NAV)" if premium is not None else ""))
         print_quarterly_annualization_warning(financials)
+
+
+    # ---- Utility mode (--utility): Damodaran's two-stage dividend model
+    # from fundamentals (his ddm2st, Investment Valuation ch. 13). A
+    # regulated utility earns about its allowed return on a rate base and
+    # pays most of it out, so growth = retention x ROE, and in stable
+    # growth the payout rises to 1 - g / ROE. The FCFF DCF reads a utility
+    # as near-worthless (it reinvests nearly everything in new plant);
+    # the dividend is what shareholders actually get. ----
+    if utility:
+        print(f"\n{'='*60}")
+        print("  Regulated utility: two-stage dividend discount model (fundamentals)")
+        print(f"{'='*60}")
+        latest_fy = max(info["fiscal_year"] for info in financials.values() if info["fiscal_year"] is not None)
+        u_args = (latest_fy, fx_currency, fx_rate)
+        net_income = reit_metric(facts, "Net income to common", [
+            "NetIncomeLossAvailableToCommonStockholdersBasic", "NetIncomeLoss", "ProfitLoss"],
+            *u_args, default=0.0)
+        dps = reit_metric(facts, "Dividend per share", [
+            "CommonStockDividendsPerShareDeclared", "CommonStockDividendsPerShareCashPaid"],
+            *u_args, default=0.0, per_share=True) * adr_ratio
+        eps = net_income / shares_out if shares_out else 0.0
+        roe = net_income / book_equity if book_equity and book_equity > 0 else None
+        payout = dps / eps if eps > 0 else None
+        print(f"\n  Earnings/share: ${eps:,.2f}   Dividend/share: ${dps:,.2f}   "
+              f"(yield {dps / share_price:.2%})" if share_price else "")
+        if roe is not None:
+            print(f"  Return on equity: {roe:.2%}  (net income / book equity ${book_equity:,.0f})")
+        if payout is not None:
+            print(f"  Payout ratio: {payout:.0%}")
+        share_series = get_annual_series(facts, ["WeightedAverageNumberOfDilutedSharesOutstanding"], years=6)
+        dilution = model.share_count_growth_rate([e["val"] for e in share_series])
+        if dilution is not None:
+            print(f"  Diluted share count growth: {dilution:.2%}/yr (FY{share_series[0]['fiscal_year']}-"
+                  f"FY{share_series[-1]['fiscal_year']})" + ("  ⚠ the rate base is being funded partly with "
+                                                              "new shares" if dilution > 0.02 else ""))
+        if eps <= 0 or roe is None or payout is None or roe <= 0:
+            print("  ⚠ Earnings or book equity isn't positive — the dividend model can't run on these figures.")
+        else:
+            if payout > 1:
+                print("  ⚠ The dividend exceeds earnings: it's being paid from debt or new shares, not profit.")
+            fundamental = max((1 - min(payout, 1.0)) * roe, 0.0)
+            print(f"  Fundamental growth (retention {1 - min(payout, 1.0):.0%} x ROE {roe:.2%}): {fundamental:.2%}")
+            print("  (Regulators set the allowed return; a utility grows earnings only by")
+            print("   retaining more of them or adding rate base funded by new capital.)")
+            growth_input = input(f"  Earnings growth for the high-growth years (e.g. 6 for 6%; Enter for "
+                                 f"{fundamental:.2%}): ").strip()
+            u_growth = parse_number(growth_input) / 100 if growth_input else fundamental
+            years_input = input("  High-growth years (Enter for 5): ").strip()
+            u_years = int(parse_number(years_input)) if years_input else 5
+            default_stable_roe = max(roe, terminal_growth + 0.01)
+            print(f"  Stable ROE: a regulated utility keeps earning about its allowed return, so the")
+            print(f"  default is today's {roe:.2%}. Set it near the cost of equity ({coe:.2%}) if you")
+            print("  think regulators will squeeze returns.")
+            roe_input = input(f"  Stable-period ROE (Enter for {default_stable_roe:.2%}): ").strip()
+            stable_roe = parse_number(roe_input) / 100 if roe_input else default_stable_roe
+            results = {}
+            for label, k, g_s in (("low", coe + 0.01, terminal_growth - 0.005), ("base", coe, terminal_growth),
+                                  ("high", coe - 0.01, terminal_growth + 0.005)):
+                results[label] = model.utility_ddm_value(eps, min(payout, 1.0), roe, u_years, k, g_s, stable_roe,
+                                                         growth=u_growth)
+            summary["ddm"] = {label: r["value"] for label, r in results.items()}
+            base = results["base"]
+            print(f"\n  Two-stage DDM (cost of equity {coe:.2%}; {u_years} yrs at {u_growth:.2%}, then "
+                  f"{terminal_growth:.2%} with payout {base['stable_payout']:.0%}):")
+            print(f"    PV of high-growth dividends: ${base['pv_dividends']:,.2f}   PV of terminal value: "
+                  f"${base['pv_terminal']:,.2f}")
+            for label in ("low", "base", "high"):
+                print(f"    {label.upper():5s}: ${results[label]['value']:>10,.2f} per share")
+            implied = model.solve_utility_growth(share_price, eps, min(payout, 1.0), roe, u_years, coe,
+                                                 terminal_growth, stable_roe)
+            summary["utility"] = {"eps": eps, "dps": dps, "payout": payout, "roe": roe, "growth": u_growth,
+                                  "fundamental_growth": fundamental, "stable_roe": stable_roe,
+                                  "implied_growth": implied, "dilution": dilution}
+            if implied is not None:
+                print(f"  The price (${share_price:,.2f}) implies {implied:.2%} earnings growth for {u_years} years "
+                      f"(vs {fundamental:.2%} from fundamentals).")
+            else:
+                print(f"  No growth from -20% to 40% justifies the price (${share_price:,.2f}) at these returns.")
 
     # ---- Equity bridge (Damodaran): the DCF values the OPERATING business;
     # getting from there to value per share means subtracting every other
@@ -5331,6 +5410,12 @@ if __name__ == "__main__":
              "rate) cross-check.",
     )
     parser.add_argument(
+        "--utility", action="store_true",
+        help="Regulated utility mode: Damodaran's two-stage dividend discount model from "
+             "fundamentals (growth = retention x ROE; stable payout = 1 - g / ROE), with a "
+             "share-dilution check and the earnings growth the price implies.",
+    )
+    parser.add_argument(
         "--financial", action="store_true",
         help="Bank / brokerage mode: values the equity with Damodaran's excess return model "
              "(book equity + PV of ROE above the cost of equity) instead of the FCFF DCF, "
@@ -5353,4 +5438,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     run_full_valuation(args.ticker, args.stage, args.narrative, args.biotech, args.reit, args.cyclical,
-                       args.financial, args.project)
+                       args.financial, args.project, args.utility)

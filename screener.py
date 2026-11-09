@@ -77,10 +77,10 @@ SECTORS = {
 # "runway" (no revenue to value yet: cash, burn, and years of runway).
 THEMES = {
     "nuclear": {
-        "Utilities & generators with nuclear fleets": {
-            "mode": "standard",
-            "tickers": ["CEG", "VST", "TLN", "PEG", "D", "DUK", "SO", "ETR", "PCG", "NEE", "XEL", "AEE",
-                        "EVRG", "PNW"]},
+        "Regulated utilities with nuclear plants": {
+            "mode": "utility",
+            "tickers": ["PEG", "D", "DUK", "SO", "ETR", "PCG", "NEE", "XEL", "AEE", "EVRG", "PNW"]},
+        "Merchant nuclear generators": {"mode": "standard", "tickers": ["CEG", "VST", "TLN"]},
         "Uranium producers & royalties": {"mode": "cyclical", "tickers": ["CCJ", "UROY"]},
         # Producing, but still losing money as mines ramp up: a margin-based
         # value is negative, so they're read like the developers.
@@ -454,9 +454,14 @@ def value_one(args):
     try:
         with contextlib.redirect_stdout(out):
             summary = valuation.run_full_valuation(ticker, None, **flags)
-        values = summary.get("excess_return") or summary.get("dcf") or {}
+        values = summary.get("excess_return") or (summary.get("ddm") if flags.get("utility") else None) \
+            or summary.get("dcf") or {}
         row.update(low=values.get("low"), base=values.get("base"), high=values.get("high"),
                    cost_of_equity=summary.get("cost_of_equity"), wacc=summary.get("wacc"))
+        if "utility" in summary:
+            u = summary["utility"]
+            row.update(roe=u.get("roe"), hist_growth=u.get("fundamental_growth"),
+                       implied_growth=u.get("implied_growth"))
         if "excess_return" in summary:
             er = summary["excess_return"]
             row.update(roe=er.get("current_roe"), stable_roe=er.get("stable_roe"),
@@ -466,7 +471,9 @@ def value_one(args):
     text = out.getvalue()
     price = re.search(r"(?:Current market price|share price)=?:? ?\$([\d,]+\.?\d*)", text)
     row["price"] = float(price.group(1).replace(",", "")) if price else None
-    implied = re.search(r"implies a (?:stable ROE|high-growth-stage rate) of (-?[\d.]+)%", text)
+    implied = re.search(r"implies (?:a stable ROE of |a high-growth-stage rate of )?(-?[\d.]+)%"
+                        r"(?: earnings growth)?", text) if flags.get("utility") else \
+        re.search(r"implies a (?:stable ROE|high-growth-stage rate) of (-?[\d.]+)%", text)
     row["price_implies"] = float(implied.group(1)) / 100 if implied else None
     row["warnings"], row["market_cap"] = run_warnings(text, needs, ticker, row["price"])
     if row.get("base") is not None and row.get("price"):
@@ -595,6 +602,8 @@ def main():
             mode = group_of[ticker][1]
             if mode == "runway":
                 return {"runway": True}, spec["needs"]
+            if mode == "utility":
+                return {"utility": True}, {"cash", "shares_outstanding", "book_equity"}
             return dict(spec["flags"], cyclical=mode == "cyclical"), spec["needs"]
         jobs = [(t, *(theme_flags(t) if t in group_of else flags_for(sic)), log_dir, answers)
                 for t, _, _, sic in universe]

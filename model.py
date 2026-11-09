@@ -1815,6 +1815,59 @@ def project_value(paths, tax_rates, discount_rate, terminal_tax_rate, perpetual=
 # SELF-TEST: validate the math against a simple worked example.
 # Run this file directly (python3 model.py) to see it check itself.
 # ---------------------------------------------------------------------
+
+# ---------------------------------------------------------------------
+# REGULATED UTILITY: Damodaran's two-stage dividend discount model
+# (ddm2st), driven by fundamentals rather than the dividend's history.
+# A regulated utility earns roughly its allowed return on a rate base
+# and pays most of it out, so:
+#   growth in earnings = retention ratio x ROE   (Investment Valuation, ch. 13)
+# and in stable growth the payout must rise to leave just enough
+# reinvestment for the stable rate:  stable payout = 1 - g_stable / ROE_stable.
+# Discounting today's dividend at its own historical growth (the auto-DDM
+# fallback above) skips that consistency check: a utility can only grow
+# faster by retaining more or earning more on what it retains.
+# ---------------------------------------------------------------------
+
+def utility_ddm_value(eps, payout, roe, high_growth_years, cost_of_equity, stable_growth, stable_roe,
+                      growth=None, stable_cost_of_equity=None):
+    """
+    Two-stage DDM per share. High growth: earnings grow at `growth`
+    (default: (1 - payout) x roe) for `high_growth_years`, paying `payout`.
+    Stable: earnings grow at stable_growth forever with payout
+    1 - stable_growth / stable_roe. Returns a dict with the value and its
+    pieces.
+    """
+    if stable_roe <= stable_growth:
+        raise ValueError("stable ROE must exceed the stable growth rate (else payout is zero or negative)")
+    ke_stable = cost_of_equity if stable_cost_of_equity is None else stable_cost_of_equity
+    if ke_stable <= stable_growth:
+        raise ValueError("cost of equity must exceed the stable growth rate")
+    g = (1 - payout) * roe if growth is None else growth
+    pv_dividends, e = 0.0, eps
+    for t in range(1, high_growth_years + 1):
+        e *= 1 + g
+        pv_dividends += e * payout / (1 + cost_of_equity) ** t
+    stable_payout = 1 - stable_growth / stable_roe
+    terminal = e * (1 + stable_growth) * stable_payout / (ke_stable - stable_growth)
+    pv_terminal = terminal / (1 + cost_of_equity) ** high_growth_years
+    return {"value": pv_dividends + pv_terminal, "growth": g, "stable_payout": stable_payout,
+            "pv_dividends": pv_dividends, "pv_terminal": pv_terminal}
+
+
+def solve_utility_growth(price, eps, payout, roe, high_growth_years, cost_of_equity, stable_growth, stable_roe,
+                         low=-0.20, high=0.40):
+    """The high-growth earnings rate at which utility_ddm_value equals the
+    price, payout held fixed. None if the price is outside the range."""
+    f = lambda g: utility_ddm_value(eps, payout, roe, high_growth_years, cost_of_equity, stable_growth,
+                                    stable_roe, growth=g)["value"] - price
+    if f(low) > 0 or f(high) < 0:
+        return None
+    for _ in range(100):
+        mid = (low + high) / 2
+        low, high = (mid, high) if f(mid) < 0 else (low, mid)
+    return (low + high) / 2
+
 if __name__ == "__main__":
     print("Running self-test with a simple hand-checkable example...\n")
 
@@ -2639,4 +2692,17 @@ if __name__ == "__main__":
         "Project ramp / capex timing mismatch!"
     print(f"Project, 2-year mine life: {pv_mine['value']:.4f}  (expected -52.6672); ramp timing checks out")
 
+
+    # Utility two-stage DDM, by hand: EPS $1, payout 50%, ROE 10% -> g 5%;
+    # 2 years at 10% cost of equity; stable 3% growth, ROE 10% -> payout 70%.
+    #   year 1: 1.05 x 0.5 / 1.1 = 0.477273;  year 2: 1.1025 x 0.5 / 1.21 = 0.455579
+    #   terminal: 1.1025 x 1.03 x 0.7 / 0.07 = 11.35575 -> / 1.21 = 9.384917
+    #   total 10.317769
+    u = utility_ddm_value(1.0, 0.5, 0.10, 2, 0.10, 0.03, 0.10)
+    print(f"\nUtility DDM: {u['value']:.6f}  (expected 10.317769)")
+    assert abs(u["growth"] - 0.05) < 1e-12 and abs(u["stable_payout"] - 0.7) < 1e-12, "Utility DDM paths wrong!"
+    assert abs(u["value"] - 10.317769) < 1e-5, "Utility DDM value mismatch!"
+    g_back = solve_utility_growth(u["value"], 1.0, 0.5, 0.10, 2, 0.10, 0.03, 0.10)
+    assert abs(g_back - 0.05) < 1e-9, "Utility implied growth must round-trip!"
+    print("Utility implied growth round-trips (5.00%)")
     print("\n✓ All self-tests passed. The math is internally consistent.")
