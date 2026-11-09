@@ -111,3 +111,7 @@ On the first run it asks for a name and email. SEC requires every EDGAR request 
 ## Disclaimer
 
 This is an educational and analytical tool, not investment advice. Its outputs depend on the assumptions you enter and on filings data that is sometimes stale or mis-tagged. The tool flags what it can, but check the numbers that matter against the filings themselves.
+
+## License
+
+MIT. See [LICENSE](LICENSE). Data from SEC EDGAR, Damodaran, the Treasury and the ECB is public; prices come from Yahoo Finance via yfinance and are subject to Yahoo's terms.
