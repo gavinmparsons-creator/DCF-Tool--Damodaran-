@@ -5014,10 +5014,24 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
                   " goodwill in,")
             print("  R&D not capitalized — a little generous for an R&D-heavy company here).")
             default_s2c, default_label = industry_s2c, f"the industry's {industry_s2c:.2f}"
+            # Revenue per dollar of operating capital (goodwill, intangibles and
+            # capitalized R&D taken out): what growing the business itself costs.
+            operating_capital = invested_capital - (goodwill_val + intangibles_val + research_val) \
+                if invested_capital else 0
+            operating_s2c = revenue / operating_capital if operating_capital > 0 else None
             if own_is_clean:
                 print("  Its own ratio is above the industry's and its capital is mostly operating assets, so its")
                 print("  own is the default: the business needs less capital to grow than its industry does.")
                 default_s2c, default_label = trailing_s2c, f"its own {trailing_s2c:.2f}"
+            elif operating_s2c and industry_s2c > 3 * operating_s2c:
+                # The industry needs far less capital than this business does
+                # (Viemed owns its rental equipment; Healthcare Support Services
+                # is mostly asset-light services at 11.75), so the industry
+                # would let it grow almost free.
+                print(f"  The industry's ratio is over 3x this company's on its operating capital ({operating_s2c:.2f},")
+                print("  goodwill, intangibles and R&D taken out): its business needs much more capital to grow,")
+                print("  so that is the default.")
+                default_s2c, default_label = operating_s2c, f"its operating-capital {operating_s2c:.2f}"
         elif trailing_s2c and trailing_s2c > 0:
             default_s2c, default_label = trailing_s2c, f"the trailing {trailing_s2c:.2f}"
         else:
