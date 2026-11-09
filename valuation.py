@@ -3360,6 +3360,37 @@ def run_project_valuation(summary, facts, fx_currency, fx_rate, financials, book
                               probability_of_failure=probability_of_failure, discount_rate=discount_rate)
 
 
+# A ticker can be a company's bond, note or preferred stock rather than its
+# common shares: Entergy Arkansas's 4.875% first mortgage bonds trade as EAI,
+# Sempra's junior subordinated notes as SREA, MetLife's preferred as MET-PA.
+# Valuing the company at that security's price is meaningless. Yahoo's
+# security name gives it away (a coupon rate, "Notes", "First Mortgage").
+_NON_COMMON_PATTERN = re.compile(
+    r"\d+(?:\.\d+)?\s?%|\b(?:notes?|nts|debentures?|bonds?|bd|first mor\w*|first mortgage|collateral trust|"
+    r"collate|subordinat\w*|junior sub\w*|preferred (?:series|shares?|stock)|pfd|depositary|depositar|"
+    r"non-?cum\w*|series \d\w*|(?:19|20)\d\d series)\b", re.IGNORECASE)
+# Not bare "Mortgage", "Preferred" or "Deposit": PennyMac Mortgage, Preferred
+# Bank and a bank's deposit business are real common stocks.
+
+
+def non_common_security(ticker):
+    """The security's name if `ticker` is a bond, note or preferred share
+    rather than common stock, else None. Uses Yahoo's names; a failed lookup
+    returns None (the valuation goes ahead)."""
+    if re.search(r"-P[A-Z]?$", ticker.upper()):
+        return ticker.upper() + " (a preferred-share class)"
+    if not YFINANCE_AVAILABLE:
+        return None
+    try:
+        info = yahoo_info(ticker)
+    except Exception:
+        return None
+    for name in (info.get("longName"), info.get("shortName")):
+        if name and _NON_COMMON_PATTERN.search(name):
+            return name.strip()
+    return None
+
+
 def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, reit=False,
                        cyclical=False, financial=False, project=False, utility=False):
     """
@@ -3371,6 +3402,14 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     """
     cik, company_name = get_cik_for_ticker(ticker)
     print(f"Found CIK {cik} for {company_name}")
+    security = non_common_security(ticker)
+    if security:
+        print(f"\n  ⚠ {ticker.upper()} isn't common stock: \"{security}\".")
+        print("  It's a bond, note or preferred share, which pays fixed amounts rather than owning the")
+        print("  business, so a company valuation at its price means nothing. Value it by its yield")
+        print("  (coupon / price, and yield to maturity or to call), or run the company's common")
+        print("  stock ticker instead.")
+        raise SystemExit(f"{ticker.upper()} is a bond or preferred, not common stock: {security}")
     summary = {"ticker": ticker.upper(), "company": company_name}
 
     financials, facts = pull_financials(cik)
