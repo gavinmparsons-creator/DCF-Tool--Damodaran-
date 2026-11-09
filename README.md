@@ -32,6 +32,7 @@ python3 valuation.py ARM --narrative
 | `--biotech` | Clinical-stage pharma | Drug-by-drug pipeline value, weighted by probability of approval. |
 | `--reit` | REITs | Dividend discount model on FFO/AFFO, cross-checked against net asset value. |
 | `--financial` | Banks and brokers | Excess return model: book equity + PV of (ROE − cost of equity) × book equity. |
+| `--utility` | Regulated electric, gas and water utilities | Damodaran's two-stage dividend model from fundamentals: growth = retention × normalized ROE; stable payout = 1 − g / ROE. |
 | `--project` | Pre-production miners and plants | Project NPV from the technical report's timing, capex, output, price and margin, with a failure probability. |
 | `--stage young\|growth\|mature\|N,M` | Any (standard model) | Sets the high-growth and fade years. |
 
@@ -80,6 +81,8 @@ The point isn't the single number. It's seeing exactly which story the price req
 Requires Python 3.9+. Market data comes from [yfinance](https://pypi.org/project/yfinance/):
 
 ```bash
+git clone https://github.com/gavinmparsons-creator/dcf-tool.git
+cd dcf-tool
 pip install yfinance
 python3 valuation.py AAPL
 ```
