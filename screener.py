@@ -206,6 +206,28 @@ def cap_universe(spec):
     return [(t, cik, n, codes[cik]) for t, cik, n in in_range if not lo <= codes[cik] <= hi]
 
 
+def earnings_calendar(day, min_cap=3e8):
+    """Tickers reporting earnings on `day` (YYYY-MM-DD) from Yahoo's
+    calendar, worth at least `min_cap`. Non-US listings (OTC ADRs ending in
+    F/Y) drop out later, when they aren't found on SEC's Nasdaq/NYSE list."""
+    import yfinance as yf
+    from datetime import datetime, timedelta
+    end = (datetime.fromisoformat(day) + timedelta(days=1)).date().isoformat()
+    cal = yf.Calendars(start=day, end=end)
+    tickers, offset = [], 0
+    while offset <= 2000:
+        try:
+            df = cal.get_earnings_calendar(limit=100, offset=offset, filter_most_active=False).reset_index()
+        except Exception:
+            break
+        if df.empty:
+            break
+        df = df[df["Event Start Date"].astype(str).str.startswith(day)]
+        tickers += [str(t) for t, cap in zip(df["Symbol"], df["Marketcap"].fillna(0)) if cap >= min_cap]
+        offset += 100
+    return list(dict.fromkeys(tickers))
+
+
 def market_cap(ticker):
     """Market cap from Yahoo, or None."""
     try:
@@ -390,6 +412,9 @@ def main():
     parser.add_argument("--tickers", nargs="+", default=[], metavar="TICKER", help="for 'tickers'")
     parser.add_argument("--tickers-file", help="for 'tickers': a file with one ticker per line (or a CSV whose "
                                                "first column is the ticker)")
+    parser.add_argument("--earnings", metavar="YYYY-MM-DD",
+                        help="for 'tickers': every company reporting earnings that day (Yahoo's calendar), "
+                             "US-listed and worth $300M+")
     parser.add_argument("--label", help="name for the results file (default: the sector)")
     parser.add_argument("--industries", nargs="+", default=[], metavar="NAME",
                         help="for 'industries': Damodaran industry names from sectors.py's table")
@@ -414,13 +439,22 @@ def main():
         print(f"  {len(universe)} companies in {', '.join(args.industries)} (from {os.path.basename(maps[-1])})")
     elif spec.get("universe") == "list":
         tickers = [t.upper() for t in args.tickers]
+        if args.earnings:
+            found = earnings_calendar(args.earnings)
+            print(f"  {len(found)} companies report on {args.earnings} (Yahoo's calendar, $300M+)")
+            tickers += found
+            label = args.label or f"earnings_{args.earnings}"
         if args.tickers_file:
             with open(args.tickers_file) as f:
                 for i, row in enumerate(csv.reader(f)):
                     if row and row[0].strip() and not (i == 0 and row[0].strip().lower() in ("symbol", "ticker")):
                         tickers.append(row[0].strip().upper())
-        listed = {t: (int(cik), name) for cik, name, t, _ex in json.loads(_get(EDGAR_TICKERS_URL))["data"] if t}
-        known = [t for t in dict.fromkeys(tickers) if t in listed]
+        exchange_data = json.loads(_get(EDGAR_TICKERS_URL))["data"]
+        listed = {t: (int(cik), name) for cik, name, t, _ex in exchange_data if t}
+        on_exchange = {t for _cik, _name, t, ex in exchange_data if t and ex in LISTED_EXCHANGES}
+        # Calendar entries include foreign over-the-counter tickers (SoftBank's
+        # SFTBF) that file nothing the tool can value: keep Nasdaq/NYSE only.
+        known = [t for t in dict.fromkeys(tickers) if t in listed and (not args.earnings or t in on_exchange)]
         codes = industry_codes([listed[t][0] for t in known])
         universe = [(t, listed[t][0], listed[t][1], codes[listed[t][0]]) for t in known]
         print(f"  {len(universe)} of {len(set(tickers))} tickers found on EDGAR")
