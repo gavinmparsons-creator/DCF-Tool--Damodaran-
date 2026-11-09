@@ -4582,8 +4582,48 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
             print(f"  Diluted share count growth: {dilution:.2%}/yr (FY{share_series[0]['fiscal_year']}-"
                   f"FY{share_series[-1]['fiscal_year']})" + ("  ⚠ the rate base is being funded partly with "
                                                               "new shares" if dilution > 0.02 else ""))
+        # One year can be far from normal for a utility (Edison's 2025: a 25%
+        # return on equity from wildfire-cost recoveries), and retention x a
+        # spike makes growth absurd. Damodaran normalizes: the median of up to
+        # five years' return on beginning-of-year equity, and of the payout.
+        ni_series = {e["fiscal_year"]: e["val"] for e in get_annual_series(facts, [
+            "NetIncomeLossAvailableToCommonStockholdersBasic", "NetIncomeLoss"], years=7)}
+        eq_series = {e["fiscal_year"]: e["val"] for e in get_annual_series(
+            facts, METRIC_TAGS["book_equity"][:2], years=7)}
+        dps_series = {e["fiscal_year"]: e["val"] for e in get_annual_series(facts, [
+            "CommonStockDividendsPerShareDeclared", "CommonStockDividendsPerShareCashPaid"], years=7)}
+        eps_series = {e["fiscal_year"]: e["val"] for e in get_annual_series(facts, [
+            "EarningsPerShareDiluted", "EarningsPerShareBasic"], years=7)}
+        roes = [ni_series[y] / eq_series[y - 1] for y in sorted(ni_series)[-5:]
+                if eq_series.get(y - 1, 0) > 0]
+        payouts = [dps_series[y] / eps_series[y] for y in sorted(dps_series)[-5:]
+                   if eps_series.get(y, 0) > 0]
+        if len(roes) >= 3:
+            roes.sort()
+            median_roe = roes[len(roes) // 2] if len(roes) % 2 else (roes[len(roes) // 2 - 1] + roes[len(roes) // 2]) / 2
+            print(f"  Return on equity, last {len(roes)} years (beginning equity): "
+                  + ", ".join(f"{r:.1%}" for r in roes) + f"  -> median {median_roe:.2%}")
+            if roe is not None and abs(roe - median_roe) > 0.03:
+                print(f"  ⚠ The latest year ({roe:.2%}) is far from the median: using the median.")
+            roe = median_roe
+            # Earnings to match: the normal return on today's book equity.
+            if book_equity and shares_out:
+                normal_eps = roe * book_equity / shares_out
+                print(f"  Normalized earnings/share (median ROE x book equity/share): ${normal_eps:,.2f} "
+                      f"(reported ${eps:,.2f})")
+                eps = normal_eps
+        if len(payouts) >= 3:
+            payouts.sort()
+            median_payout = payouts[len(payouts) // 2]
+            if payout is not None and abs(payout - median_payout) > 0.15:
+                print(f"  Payout: latest {payout:.0%}, median of {len(payouts)} years {median_payout:.0%} — using the median.")
+                payout = median_payout
         if eps <= 0 or roe is None or payout is None or roe <= 0:
             print("  ⚠ Earnings or book equity isn't positive — the dividend model can't run on these figures.")
+        elif payout < 0.20:
+            print(f"  ⚠ Pays out only {payout:.0%} of earnings: this isn't a dividend-paying regulated utility,")
+            print("    and a dividend model doesn't fit it. Value it on the standard model instead.")
+            summary["utility"] = {"eps": eps, "dps": dps, "payout": payout, "roe": roe, "not_a_payer": True}
         else:
             if payout > 1:
                 print("  ⚠ The dividend exceeds earnings: it's being paid from debt or new shares, not profit.")

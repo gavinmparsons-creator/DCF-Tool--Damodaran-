@@ -139,7 +139,13 @@ def sector_universe(sector):
     listed = {}
     for cik, name, ticker, exchange in json.loads(_get(EDGAR_TICKERS_URL))["data"]:
         if exchange in LISTED_EXCHANGES and ticker:
-            listed.setdefault(int(cik), (ticker, name))
+            # A company can list notes or preferred beside its common stock
+            # (Sempra's SREA notes come before SRE): the common is the plain,
+            # shortest ticker.
+            current = listed.get(int(cik))
+            if current is None or ("-" not in ticker and (len(ticker), ticker) < (len(current[0]), current[0])) \
+                    or ("-" in current[0] and "-" not in ticker):
+                listed[int(cik)] = (ticker, name)
     found = []
     for sic in SECTORS[sector]["sic"]:
         start = 0
@@ -469,6 +475,8 @@ def value_one(args):
             or summary.get("dcf") or {}
         row.update(low=values.get("low"), base=values.get("base"), high=values.get("high"),
                    cost_of_equity=summary.get("cost_of_equity"), wacc=summary.get("wacc"))
+        if (summary.get("utility") or {}).get("not_a_payer"):
+            row["error"] = "pays little or no dividend: not a dividend-model utility (run it standard)"
         if "utility" in summary:
             u = summary["utility"]
             row.update(roe=u.get("roe"), hist_growth=u.get("fundamental_growth"),
