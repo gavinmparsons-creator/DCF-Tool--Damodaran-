@@ -51,6 +51,11 @@ SECTORS = {
     # Small caps: every listed operating company from $300M to $2B, on the
     # standard model. Financials, REITs and blank-check shells (SIC 6000-6999)
     # are left out — they need bank or REIT mode.
+    # Any Damodaran industries from the sector map (python3 sectors.py first),
+    # named with --industries: e.g. Machinery "Restaurant/Dining".
+    "industries": {"universe": "sector_map", "flags": {"insight": True},
+                   "about": "the industries named with --industries, from the sector map (sectors.py)",
+                   "needs": {"revenue", "operating_income", "cash", "shares_outstanding", "book_equity"}},
     "smallcap": {"universe": "cap", "min_cap": 3e8, "max_cap": 2e9, "exclude_sic": (6000, 6999),
                  "flags": {"insight": True},
                  "about": "listed operating companies from $300M to $2B, excluding financials and REITs",
@@ -377,6 +382,8 @@ def main():
     parser.add_argument("--max-cap", type=float, default=float("inf"), help="maximum market cap (e.g. 5e9)")
     parser.add_argument("--limit", type=int, help="value only the first N companies (a quick test)")
     parser.add_argument("--workers", type=int, default=4, help="companies valued at once (default 4)")
+    parser.add_argument("--industries", nargs="+", default=[], metavar="NAME",
+                        help="for 'industries': Damodaran industry names from sectors.py's table")
     parser.add_argument("--answer", action="append", default=[], metavar="PROMPT=VALUE",
                         help="answer every prompt containing PROMPT with VALUE instead of Enter, e.g. "
                              "--answer \"type a beta to use as is=0.76\" (repeatable)")
@@ -384,7 +391,19 @@ def main():
 
     spec = SECTORS[args.sector]
     print(f"Finding {args.sector}: {spec['about']}...")
-    if spec.get("universe") == "cap":
+    label = args.sector
+    if spec.get("universe") == "sector_map":
+        import glob
+        maps = sorted(glob.glob(os.path.join(SCREEN_DIR, "sectors_*.csv")))
+        if not maps or not args.industries:
+            sys.exit("Run python3 sectors.py first, and name industries with --industries.")
+        wanted = {n.lower() for n in args.industries}
+        with open(maps[-1]) as f:
+            universe = [(r["ticker"], None, r["company"], int(r["sic"] or 0)) for r in csv.DictReader(f)
+                        if r["industry"].lower() in wanted]
+        label = "_".join(re.sub(r"[^a-z]+", "", n.lower())[:12] for n in args.industries)
+        print(f"  {len(universe)} companies in {', '.join(args.industries)} (from {os.path.basename(maps[-1])})")
+    elif spec.get("universe") == "cap":
         # The universe takes ~15 minutes to build (SEC's rate limit on the
         # industry-code lookups), so it's saved for the day and reused.
         cache = os.path.join(SCREEN_DIR, f"universe_{args.sector}_{date.today().isoformat()}.json")
@@ -414,7 +433,7 @@ def main():
     if args.limit:
         universe = universe[:args.limit]
 
-    log_dir = os.path.join(SCREEN_DIR, "logs", args.sector)
+    log_dir = os.path.join(SCREEN_DIR, "logs", label)
     names = {t: (n, s) for t, _, n, s in universe}
     rows = []
     print(f"Valuing {len(universe)} companies ({args.workers} at a time; each takes ~20-60 seconds)...")
@@ -432,7 +451,7 @@ def main():
     rank_by = "record_to_price" if spec["flags"].get("insight") else "value_to_price"
     rows.sort(key=lambda r: r.get(rank_by) if r.get(rank_by) is not None else -1e9, reverse=True)
     os.makedirs(SCREEN_DIR, exist_ok=True)
-    path = os.path.join(SCREEN_DIR, f"{args.sector}_{date.today().isoformat()}.csv")
+    path = os.path.join(SCREEN_DIR, f"{label}_{date.today().isoformat()}.csv")
     fields = ["ticker", "name", "sic", "market_cap", "price", "low", "base", "high", "value_to_price",
               "record_value", "record_to_price", "hist_growth", "implied_growth", "expectations_gap", "margin_now",
               "price_implies",
