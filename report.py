@@ -238,10 +238,15 @@ def company_report(ticker):
             f"| FY{e['fiscal_year']} | ${e['val'] / 1e9:,.2f}B |" for e in revenue] + [""]
     last_year = (revenue[-1]["val"] / revenue[-2]["val"] - 1
                  if len(revenue) >= 2 and revenue[-2]["val"] > 0 else None)
+    ytd, ytd_label = valuation.year_to_date_growth(facts, [t for t in valuation.METRIC_TAGS["revenue"]
+                                                           if isinstance(t, str)])
     lines += [f"- Revenue growth {span or ''}: **{pct(cagr)}** a year; latest year "
               f"(FY{revenue[-1]['fiscal_year'] if revenue else ''}) **{pct(last_year)}**"
               + (" — a big break from the trend (an acquisition, a divestiture, a new product?)"
                  if last_year is not None and cagr is not None and abs(last_year - cagr) > 0.20 else ""),
+              *([f"- This year so far ({ytd_label}): **{pct(ytd)}**"
+                 + (" — far off the multi-year rate; the stories below start from that rate, so check which "
+                    "one you believe" if cagr is not None and abs(ytd - cagr) > 0.15 else "")] if ytd is not None else []),
               f"- Operating margin over the cycle (as reported): mean "
               f"**{pct(stats['mean']) if stats else 'n/a'}**, median {pct(stats['median']) if stats else 'n/a'} "
               f"({stats['n_years'] if stats else 0} years)",

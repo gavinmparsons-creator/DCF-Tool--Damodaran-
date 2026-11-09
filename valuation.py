@@ -1188,6 +1188,26 @@ def ttm_from_quarters(facts_json, tag_candidates):
     return None, None
 
 
+def year_to_date_growth(facts_json, tag_candidates):
+    """Growth of the latest 10-Q year-to-date figure over the same period a
+    year earlier — the freshest read on a trend, which a fiscal-year figure
+    can miss by up to a year (Exzeo: +62% in FY2025, +4% in 2026's first
+    half). Returns (growth, label) or (None, None)."""
+    for tag in tag_candidates:
+        entries = [e for e in _quarterly_entries(facts_json, tag, "USD") if e.get("start")]
+        if not entries:
+            continue
+        latest_end = max(e["end"] for e in entries)
+        current = max((e for e in entries if e["end"] == latest_end), key=lambda e: _days(e["start"], e["end"]))
+        length = _days(current["start"], current["end"])
+        prior = [e for e in entries if abs(_days(e["end"], latest_end) - 364) <= 8
+                 and abs(_days(e["start"], e["end"]) - length) <= 8]
+        if prior and prior[-1]["val"] > 0:
+            months = round(length / 30.4)
+            return current["val"] / prior[-1]["val"] - 1, f"{months} months to {latest_end} vs a year earlier"
+    return None, None
+
+
 def freshest_ttm(facts_json, tag_candidates):
     """freshest_annual_value for a flow figure, upgraded to trailing twelve
     months when a newer 10-Q year-to-date exists. Returns (value, tag,
