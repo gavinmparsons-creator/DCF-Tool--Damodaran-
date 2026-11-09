@@ -81,7 +81,7 @@ The point isn't the single number. It's seeing exactly which story the price req
 Requires Python 3.9+. Market data comes from [yfinance](https://pypi.org/project/yfinance/):
 
 ```bash
-git clone https://github.com/gavinmparsons-creator/dcf-tool.git
+git clone https://github.com/gavinmparsons-creator/DCF-Tool--Damodaran-.git dcf-tool
 cd dcf-tool
 pip install yfinance
 python3 valuation.py AAPL
