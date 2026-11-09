@@ -51,7 +51,7 @@ REIT_SIC = {6798}
 # fundamentals. Merchant generators share code 4911 but sell power at
 # market prices and pay little out, so they stay on the standard model.
 UTILITY_SIC = {4911, 4924, 4931, 4932, 4939, 4941}
-MERCHANT_GENERATORS = {"CEG", "VST", "TLN", "NRG"}
+MERCHANT_GENERATORS = screener.MERCHANT_GENERATORS
 CYCLICAL_SIC = (list(range(1000, 1500)) + list(range(2800, 2830)) + list(range(2860, 2900))
                 + list(range(2900, 3000)) + list(range(3310, 3400)) + [1531, 1520, 6552]
                 + list(range(3711, 3717)) + list(range(4400, 4500)) + list(range(3530, 3540)))

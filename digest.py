@@ -58,10 +58,11 @@ def main():
     has_record = "record_to_price" in rows[0] and any(r.get("record_to_price") for r in rows)
     key = "record_to_price" if has_record else "value_to_price"
     if has_record:
-        # A theme screen mixes models: a utility's dividend-model value stands in
-        # for the record value, and its fundamental growth for the record.
+        # A mixed screen (a theme, utilities with merchant generators, an
+        # earnings day with banks): a dividend- or excess-return-model value
+        # stands in for the record value, and fundamental growth for the record.
         for r in rows:
-            if not r.get("record_to_price") and r.get("value_to_price") and r.get("group"):
+            if not r.get("record_to_price") and r.get("value_to_price") and (r.get("group") or r.get("roe")):
                 r.update(record_to_price=r["value_to_price"], record_value=r["base"], model_value="1")
                 if r.get("implied_growth") and r.get("hist_growth"):
                     r["expectations_gap"] = str(num(r["implied_growth"]) - num(r["hist_growth"]))

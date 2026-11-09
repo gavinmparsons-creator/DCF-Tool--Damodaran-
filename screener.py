@@ -44,6 +44,13 @@ SECTORS = {
     "banks": {"sic": [6021, 6022, 6029, 6035, 6036], "flags": {"financial": True},
               "about": "national and state commercial banks, savings institutions (--financial)",
               "needs": {"book_equity", "shares_outstanding"}},
+    # Regulated electric, gas-distribution, combination and water utilities:
+    # Damodaran's two-stage dividend model from fundamentals. Merchant
+    # generators file under 4911 too but sell at market prices: standard model.
+    "utilities": {"sic": [4911, 4924, 4931, 4932, 4939, 4941], "flags": {"utility": True},
+                  "about": "regulated electric, gas and water utilities (--utility); merchant generators "
+                           "on the standard model",
+                  "needs": {"cash", "shares_outstanding", "book_equity"}},
     "builders": {"sic": [1531, 6552, 1520], "flags": {"cyclical": True, "insight": True},
                  "about": "homebuilders, land developers and residential contractors (Lennar files as one) "
                           "(--cyclical)",
@@ -92,6 +99,10 @@ THEMES = {
             "mode": "runway", "tickers": ["OKLO", "SMR", "NNE", "LTBR", "IMSR", "FRMI", "NXE", "DNN"]},
     },
 }
+
+# Generators that sell power at market prices rather than earning a
+# regulated return (they share SEC code 4911 with regulated utilities).
+MERCHANT_GENERATORS = {"CEG", "VST", "TLN", "NRG"}
 
 EDGAR_SIC_URL = ("https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&SIC={sic}&type=10-K"
                  "&dateb=&owner=include&count=100&start={start}&output=atom")
@@ -611,7 +622,11 @@ def main():
             if mode == "utility":
                 return {"utility": True}, {"cash", "shares_outstanding", "book_equity"}
             return dict(spec["flags"], cyclical=mode == "cyclical"), spec["needs"]
-        jobs = [(t, *(theme_flags(t) if t in group_of else flags_for(sic)), log_dir, answers)
+        def sector_flags(ticker, sic):
+            if spec["flags"].get("utility") and ticker in MERCHANT_GENERATORS:
+                return {"insight": True}, SECTORS["smallcap"]["needs"]
+            return flags_for(sic)
+        jobs = [(t, *(theme_flags(t) if t in group_of else sector_flags(t, sic)), log_dir, answers)
                 for t, _, _, sic in universe]
         for i, row in enumerate(pool.imap_unordered(value_one, jobs), start=1):
             row["name"], row["sic"] = names[row["ticker"]]
