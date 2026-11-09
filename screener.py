@@ -476,6 +476,12 @@ def value_one(args):
         re.search(r"implies a (?:stable ROE|high-growth-stage rate) of (-?[\d.]+)%", text)
     row["price_implies"] = float(implied.group(1)) / 100 if implied else None
     row["warnings"], row["market_cap"] = run_warnings(text, needs, ticker, row["price"])
+    if flags.get("utility"):
+        # The dividend model doesn't use free cash flow or depreciation: a
+        # utility's negative FCFF (it reinvests everything) is why it's here.
+        row["warnings"] = "; ".join(w for w in row["warnings"].split("; ")
+                                    if w and w != "negative cash flow" and w != "returns below cost of capital"
+                                    and not w.startswith("stale depreciation"))
     if row.get("base") is not None and row.get("price"):
         row["value_to_price"] = row["base"] / row["price"]
     os.makedirs(log_dir, exist_ok=True)
