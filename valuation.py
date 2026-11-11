@@ -3360,6 +3360,157 @@ def run_project_valuation(summary, facts, fx_currency, fx_rate, financials, book
                               probability_of_failure=probability_of_failure, discount_rate=discount_rate)
 
 
+GRAHAM_NET_INCOME_TAGS = ["NetIncomeLoss", "ProfitLossAttributableToOwnersOfParent",
+                          "NetIncomeLossAvailableToCommonStockholdersBasic"]
+GRAHAM_DIVIDEND_TAGS = (METRIC_TAGS["dividends_per_share"] + COMMON_DIVIDEND_TAGS
+                        + ["PaymentsOfDividends", "DividendsPaid"])  # last: ifrs-full
+
+
+def run_graham_view(summary, facts, fx_currency, fx_rate, financials, current_value, share_price, shares,
+                    book_equity, preferred, minority_interest, bridge_debt, bridge_cash, nopat, discount_rate):
+    """
+    --graham: Benjamin Graham's view of the same company, next to the DCF.
+    Reported figures only, no new prompts and no new estimates:
+      1. Greenwald's three layers — net current asset value (Graham's
+         liquidation floor), earning power value (today's NOPAT / WACC,
+         i.e. the DCF with zero growth) and growth value (the DCF minus
+         that) — and how much of the price each covers.
+      2. Graham's defensive-investor checklist (The Intelligent Investor,
+         ch. 14) from EDGAR's 10+ years of annual data, with "can't
+         verify" where the history he asks for predates EDGAR's XBRL data.
+      3. The Graham number (the price ceiling his P/E x P/B <= 22.5 test
+         implies) and tangible book, for reference.
+    Prints the section and records summary["graham"]. Changes nothing else.
+    """
+    def fx(entries):
+        return [e["val"] * fx_rate if fx_currency and e["unit"] == fx_currency else e["val"] for e in entries]
+
+    def balance(tags):
+        val, tag = current_value(tags)
+        return val if tag else None
+
+    print(f"\n{'='*60}")
+    print("  Graham view (assets, earning power, growth)")
+    print(f"{'='*60}")
+    current_assets = balance(["AssetsCurrent", "CurrentAssets"])  # us-gaap, ifrs-full
+    current_liabilities = balance(["LiabilitiesCurrent", "CurrentLiabilities"])
+    liabilities = balance(["Liabilities"])
+    if liabilities is None:
+        # Some filers tag only "total liabilities and equity": back out equity, incl. minority.
+        total_le = balance(["LiabilitiesAndStockholdersEquity", "EquityAndLiabilities"])
+        equity_all = balance(["StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest", "Equity"])
+        if equity_all is None and book_equity is not None:
+            equity_all = book_equity + minority_interest
+        liabilities = total_le - equity_all if total_le is not None and equity_all is not None else None
+
+    # ---- Layer 1: net current asset value ----
+    ncav_per_share = None
+    if current_assets is None or liabilities is None:
+        print("  Net current asset value: n/a — the balance sheet doesn't split out current assets")
+        print("  (usual for banks, insurers, and many utilities and REITs).")
+    else:
+        ncav = model.graham_ncav(current_assets, liabilities, preferred) - minority_interest
+        ncav_per_share = ncav / shares
+        print(f"  Current assets ${current_assets:,.0f} - all liabilities ${liabilities:,.0f}"
+              + (f" - preferred ${preferred:,.0f}" if preferred else "")
+              + (f" - minority ${minority_interest:,.0f}" if minority_interest else ""))
+        print(f"  1. Net current asset value:  ${ncav_per_share:>10,.2f} per share   "
+              + (f"(net-net buy line, 2/3 of it: ${ncav_per_share * 2 / 3:,.2f})" if ncav_per_share > 0
+                 else "(negative: total liabilities exceed current assets — no liquidation floor)"))
+
+    # ---- Layer 2: earning power value (the DCF with zero growth) ----
+    epv_per_share = None
+    if nopat is None or nopat <= 0:
+        print("  2. Earning power value:      n/a — no positive normalized operating income to capitalize")
+    else:
+        epv_operating = model.earnings_power_value(nopat, discount_rate)
+        epv_per_share, _ = model.equity_value_per_share(epv_operating, bridge_debt, bridge_cash, shares)
+        print(f"  2. Earning power value:      ${epv_per_share:>10,.2f} per share   (NOPAT ${nopat:,.0f} "
+              f"/ WACC {discount_rate:.2%},")
+        print("     same EBIT and equity bridge as the DCF; no growth, depreciation ~ maintenance capex)")
+
+    # ---- Layer 3: growth value, against whichever full valuation ran ----
+    full_views = [("DCF", summary.get("dcf", {}).get("base"))]
+    if summary.get("narrative"):
+        full_views.append(("narrative DCF", summary["narrative"].get("base")))
+    layers = None
+    for name, full_value in full_views:
+        if full_value is None:
+            continue
+        layers = model.graham_value_layers(ncav_per_share, epv_per_share, full_value, share_price)
+        if layers["growth_value"] is not None:
+            print(f"  3. Growth value ({name} base ${full_value:,.2f} - earning power): "
+                  f"${layers['growth_value']:>+10,.2f} per share")
+            if layers["growth_value"] < 0:
+                print("     Negative: the forecast is worth less than today's earnings held flat — its margins")
+                print("     fall below today's normalized level, or it reinvests at returns below the cost of")
+                print("     capital (growth that destroys value). Worth checking which, in the inputs above.")
+    if layers is None:
+        layers = model.graham_value_layers(ncav_per_share, epv_per_share, None, share_price)
+
+    print(f"\n  Price ${share_price:,.2f}:")
+    if epv_per_share is None:
+        print("  - no earning power to cover any of it: the whole price is a bet on future earnings,")
+        print("    which Graham would call speculation rather than investment.")
+    if layers["net_net"]:
+        print("  - below 2/3 of net current asset value: a Graham net-net.")
+    if epv_per_share is not None:
+        if layers["paid_for_growth"] == 0:
+            print(f"  - covered by earning power alone (${epv_per_share:,.2f}): you pay nothing for growth,")
+            print("    Graham's margin of safety.")
+        else:
+            print(f"  - ${layers['paid_for_growth']:,.2f} of it ({layers['paid_for_growth_share']:.0%}) is above "
+                  "earning power: the part you're paying for growth,")
+            print("    which Graham wouldn't pay for and the DCF above has to justify.")
+
+    # ---- Defensive-investor checklist ----
+    ni_entries = get_annual_series(facts, GRAHAM_NET_INCOME_TAGS, years=20)
+    earnings = fx(ni_entries)
+    dividend_years = set()
+    for recipe in GRAHAM_DIVIDEND_TAGS:
+        for e in get_annual_series(facts, [recipe], years=25):
+            if e["val"] and e["val"] > 0:
+                dividend_years.add(e["fiscal_year"])
+    paid_by_year = [(e["fiscal_year"], e["fiscal_year"] in dividend_years) for e in ni_entries]
+    long_term_debt = financials.get("total_debt_noncurrent", {}).get("value") or 0.0
+    market_cap = share_price * shares
+    checks = model.graham_defensive_checklist(current_assets, current_liabilities, long_term_debt, earnings,
+                                              paid_by_year, market_cap, book_equity)
+    span = f"FY{ni_entries[0]['fiscal_year']}-FY{ni_entries[-1]['fiscal_year']}" if ni_entries else "none on file"
+    print(f"\n  Graham's defensive-investor tests (The Intelligent Investor, ch. 14; earnings {span},")
+    print("  total net income since EDGAR's older per-share figures aren't split-adjusted):")
+    marks = {"pass": "✓", "fail": "✗", "can't verify": "?", "n/a": "-"}
+    for c in checks:
+        print(f"    {marks[c['status']]} {c['test']:<50s} {c['detail']}")
+    passed = sum(c["status"] == "pass" for c in checks)
+    print(f"    {passed} of {len(checks)} pass   (size test skipped: Graham's threshold is in 1971 dollars)")
+
+    # ---- Reference figures ----
+    avg_eps = sum(earnings[-3:]) / 3 / shares if len(earnings) >= 3 else None
+    book_per_share = book_equity / shares if book_equity else None
+    g_number = model.graham_number(avg_eps, book_per_share)
+    goodwill = balance(["Goodwill"]) or 0.0
+    intangibles = balance(["IntangibleAssetsNetExcludingGoodwill", "IntangibleAssetsOtherThanGoodwill"]) or 0.0
+    tangible_per_share = (book_equity - goodwill - intangibles) / shares if book_equity is not None else None
+    print("\n  For reference:")
+    print("    Graham number (highest price passing P/E x P/B <= 22.5): "
+          + (f"${g_number:,.2f}" if g_number else "n/a (3-yr earnings or book equity not positive)"))
+    if tangible_per_share is not None:
+        print(f"    Tangible book per share: ${tangible_per_share:,.2f}   "
+              + (f"(his enterprising-investor ceiling, 120%: ${tangible_per_share * 1.2:,.2f})"
+                 if tangible_per_share > 0 else "(negative: no tangible asset backing)"))
+    print("    Not computed: his 1962 'EPS x (8.5 + 2g)' — it needs a guessed growth rate in constants")
+    print("    set to 1962 bond yields. Expect asset-light, buyback-heavy companies to fail the book")
+    print("    tests: expensed R&D and repurchases shrink book value. That's his method, not a data error.")
+
+    summary["graham"] = {
+        "ncav_per_share": ncav_per_share, "epv_per_share": epv_per_share,
+        "growth_value": layers["growth_value"], "paid_for_growth_share": layers["paid_for_growth_share"],
+        "graham_number": g_number, "tangible_book_per_share": tangible_per_share,
+        "tests_passed": passed, "tests": {c["test"]: c["status"] for c in checks},
+    }
+
+
 # A ticker can be a company's bond, note or preferred stock rather than its
 # common shares: Entergy Arkansas's 4.875% first mortgage bonds trade as EAI,
 # Sempra's junior subordinated notes as SREA, MetLife's preferred as MET-PA.
@@ -3392,7 +3543,7 @@ def non_common_security(ticker):
 
 
 def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, reit=False,
-                       cyclical=False, financial=False, project=False, utility=False):
+                       cyclical=False, financial=False, project=False, utility=False, graham=False):
     """
     Interactive valuation of one company. Prints the full build, and
     returns a summary dict of the key inputs and results (beta, ERP, WACC,
@@ -4108,11 +4259,16 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         run_financial_firm_valuation(summary, facts, fx_currency, fx_rate, financials, book_equity, shares_out,
                                      share_price, coe, damodaran, roe_mix or mix, risk_free_rate,
                                      beta_source, erp_source)
+        if graham:
+            print("\n  --graham skipped: Graham's tests (current ratio, net current assets, earning power on")
+            print("  operating income) don't apply to a bank or broker's balance sheet.")
         return summary
     if project:
         run_project_valuation(summary, facts, fx_currency, fx_rate, financials, book_equity, shares_out,
                               share_price, market_cap, total_debt, cash, coe, risk_free_rate,
                               marginal_tax_rate, damodaran, mix)
+        if graham:
+            print("\n  --graham skipped: a project with no operating earnings yet has no earning power to test.")
         return summary
 
     # ---- Reinvestment-rate-derived growth (Damodaran fundamental growth) ----
@@ -5447,6 +5603,11 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
             print(f"\n  ⚠ {blend_ordering_warning}")
         print_quarterly_annualization_warning(financials)
 
+    if graham:
+        run_graham_view(summary, facts, fx_currency, fx_rate, financials, current_value, share_price,
+                        value_shares, book_equity, bridge_preferred, minority_interest, bridge_debt, bridge_cash,
+                        terminal_nopat_basis, discount_rate)
+
     print("\n  This is a mechanical DCF estimate based on the last 10-K only, plus")
     print("  whatever WACC / terminal growth / qualitative overrides you entered")
     print("  above. It still won't catch anything you didn't think to override —")
@@ -5518,7 +5679,14 @@ if __name__ == "__main__":
              "the narrative DCF's default target. Without this flag, normalization still "
              "runs when EBIT is negative or under half its cycle average.",
     )
+    parser.add_argument(
+        "--graham", action="store_true",
+        help="Also show Benjamin Graham's view: value split into net current assets, earning power "
+             "(today's normalized operating income / WACC, no growth) and growth (the DCF minus that), "
+             "how much of the price pays for growth, his defensive-investor checklist and the Graham "
+             "number. Reported figures only; adds no prompts and changes no other number.",
+    )
     args = parser.parse_args()
 
     run_full_valuation(args.ticker, args.stage, args.narrative, args.biotech, args.reit, args.cyclical,
-                       args.financial, args.project, args.utility)
+                       args.financial, args.project, args.utility, args.graham)

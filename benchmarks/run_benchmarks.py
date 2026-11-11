@@ -164,7 +164,8 @@ def run_case(case, refresh, refresh_only=()):
                 ticker, flags.get("stage"), narrative=flags.get("narrative", False),
                 biotech=flags.get("biotech", False), reit=flags.get("reit", False),
                 cyclical=flags.get("cyclical", False), financial=flags.get("financial", False),
-                project=flags.get("project", False))
+                project=flags.get("project", False), utility=flags.get("utility", False),
+                graham=flags.get("graham", False))
     finally:
         os.makedirs(LOG_DIR, exist_ok=True)
         with open(os.path.join(LOG_DIR, f"{ticker}.log"), "w") as f:

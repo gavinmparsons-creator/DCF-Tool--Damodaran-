@@ -1868,6 +1868,162 @@ def solve_utility_growth(price, eps, payout, roe, high_growth_years, cost_of_equ
         low, high = (mid, high) if f(mid) < 0 else (low, mid)
     return (low + high) / 2
 
+
+# ---- Benjamin Graham layer (--graham) ----
+# Graham (Security Analysis, 1934; The Intelligent Investor, 1973 ed.)
+# valued a company from what it HAS and what it EARNS NOW, and refused to
+# pay for growth. Bruce Greenwald's restatement splits value into three
+# layers, which is how this tool shows it next to the Damodaran DCF:
+#   1. assets       - net current asset value (Graham's liquidation floor)
+#   2. earning power - today's normalized NOPAT / WACC, no growth
+#   3. growth       - the full DCF minus layer 2
+# Layer 2 is the DCF's own terminal value with growth set to zero (see
+# terminal_value_consistent: when new capital earns exactly its cost,
+# growth adds nothing, and value collapses to NOPAT / WACC). Graham's
+# 1962 "V = EPS x (8.5 + 2g)" formula is deliberately NOT built: it needs
+# a guessed 7-10 year growth rate fed into constants calibrated to 1962
+# bond yields, i.e. an estimate inside an approximation.
+
+def graham_ncav(current_assets, total_liabilities, preferred=0.0):
+    """Net current asset value: current assets minus ALL liabilities and
+    preferred stock — Graham's 'net-net', a liquidation floor that gives
+    nothing for fixed assets, brands or future earnings. He bought below
+    two-thirds of it."""
+    return current_assets - total_liabilities - preferred
+
+
+def earnings_power_value(nopat, discount_rate):
+    """Greenwald/Graham earning power value of the operations: normalized
+    after-tax operating income capitalized at the cost of capital, with no
+    growth. Assumes depreciation ~ maintenance capex (as the FCFF build
+    does when growth is zero)."""
+    if discount_rate <= 0:
+        raise ValueError("discount_rate must be positive")
+    return nopat / discount_rate
+
+
+def graham_number(avg_eps, book_per_share):
+    """The highest price that passes Graham's defensive test P/E x P/B <=
+    22.5 (P/E 15 x P/B 1.5): sqrt(22.5 x EPS x book per share), EPS on a
+    3-year average. None when either is zero or negative — the test has
+    no answer for a loss-maker or negative book equity."""
+    if avg_eps is None or book_per_share is None or avg_eps <= 0 or book_per_share <= 0:
+        return None
+    return math.sqrt(22.5 * avg_eps * book_per_share)
+
+
+def three_year_average_growth(earnings):
+    """Graham's earnings-growth test: average of the LAST three years over
+    the average of the FIRST three, oldest-first list. Returns (start_avg,
+    end_avg, growth); growth is None when start_avg <= 0 (no meaningful
+    ratio) or there are fewer than 6 years."""
+    if len(earnings) < 6:
+        return None, None, None
+    start_avg = sum(earnings[:3]) / 3
+    end_avg = sum(earnings[-3:]) / 3
+    growth = end_avg / start_avg - 1 if start_avg > 0 else None
+    return start_avg, end_avg, growth
+
+
+def graham_defensive_checklist(current_assets, current_liabilities, long_term_debt, earnings_history,
+                               dividends_paid_by_year, market_cap, book_equity):
+    """
+    Graham's seven tests for the defensive investor (The Intelligent
+    Investor, ch. 14), minus size, whose dollar threshold is in 1971
+    dollars. Inputs are reported figures only:
+        earnings_history       - net income, oldest first, up to 10+ years
+        dividends_paid_by_year - [(fiscal_year, paid?)], oldest first
+    Each row is {"test", "status", "detail"}; status is one of "pass",
+    "fail", "can't verify" (the history needed isn't in the data) or
+    "n/a" (the input doesn't exist, e.g. an unclassified balance sheet).
+    Earnings are TOTAL net income, not per share: EDGAR's older per-share
+    figures aren't restated for later splits.
+    """
+    rows = []
+
+    def row(test, status, detail):
+        rows.append({"test": test, "status": status, "detail": detail})
+
+    if current_assets is None or current_liabilities is None or current_liabilities <= 0:
+        row("Current ratio >= 2", "n/a", "no current assets/liabilities split on the balance sheet")
+        row("Long-term debt <= net current assets", "n/a", "no current assets/liabilities split")
+    else:
+        ratio = current_assets / current_liabilities
+        row("Current ratio >= 2", "pass" if ratio >= 2 else "fail", f"{ratio:.2f}")
+        net_current = current_assets - current_liabilities
+        ltd = long_term_debt or 0.0
+        row("Long-term debt <= net current assets", "pass" if ltd <= net_current else "fail",
+            f"debt ${ltd / 1e9:,.2f}B vs net current assets ${net_current / 1e9:,.2f}B")
+
+    last10 = earnings_history[-10:]
+    losses = sum(1 for e in last10 if e <= 0)
+    if losses:
+        row("Earnings positive each of 10 years", "fail", f"{losses} loss year(s) in the last {len(last10)}")
+    elif len(last10) < 10:
+        row("Earnings positive each of 10 years", "can't verify",
+            f"positive in all {len(last10)} years on file; 10 needed")
+    else:
+        row("Earnings positive each of 10 years", "pass", "10 of 10")
+
+    years_on_file = len(dividends_paid_by_year)
+    missed = [fy for fy, paid in dividends_paid_by_year if not paid]
+    if missed and len(missed) == years_on_file:
+        row("Dividends uninterrupted 20 years", "fail", f"none paid in any of the {years_on_file} years on file")
+    elif missed:
+        row("Dividends uninterrupted 20 years", "fail",
+            f"none found for FY{', FY'.join(str(fy) for fy in missed[-3:])}"
+            + (f" (+{len(missed) - 3} earlier)" if len(missed) > 3 else ""))
+    elif years_on_file < 20:
+        row("Dividends uninterrupted 20 years", "can't verify",
+            f"paid in all {years_on_file} years on file; EDGAR's data doesn't reach back 20")
+    else:
+        row("Dividends uninterrupted 20 years", "pass", f"{years_on_file} of {years_on_file}")
+
+    start_avg, end_avg, growth = three_year_average_growth(last10)
+    if growth is None:
+        row("Earnings up >= 1/3 over 10 years (3-yr averages)", "can't verify" if start_avg is None else "fail",
+            "fewer than 6 years on file" if start_avg is None else "starting 3-year average is a loss")
+    elif len(last10) < 10:
+        row("Earnings up >= 1/3 over 10 years (3-yr averages)", "can't verify",
+            f"{growth:+.0%} over the {len(last10)} years on file; 10 needed")
+    else:
+        row("Earnings up >= 1/3 over 10 years (3-yr averages)", "pass" if growth >= 1 / 3 else "fail",
+            f"{growth:+.0%}")
+
+    avg3 = sum(earnings_history[-3:]) / 3 if len(earnings_history) >= 3 else None
+    pe = market_cap / avg3 if avg3 and avg3 > 0 else None
+    pb = market_cap / book_equity if book_equity and book_equity > 0 else None
+    if pe is None:
+        row("P/E <= 15 on 3-year average earnings", "fail" if avg3 is not None else "can't verify",
+            "3-year average is a loss" if avg3 is not None else "fewer than 3 years on file")
+    else:
+        row("P/E <= 15 on 3-year average earnings", "pass" if pe <= 15 else "fail", f"{pe:.1f}")
+    if pe is None or pb is None:
+        row("P/B <= 1.5, or P/E x P/B <= 22.5", "fail",
+            "negative book equity" if pb is None else "no positive 3-year earnings")
+    else:
+        ok = pb <= 1.5 or pe * pb <= 22.5
+        row("P/B <= 1.5, or P/E x P/B <= 22.5", "pass" if ok else "fail",
+            f"P/B {pb:.2f}, P/E x P/B {pe * pb:.1f}")
+    return rows
+
+
+def graham_value_layers(ncav_per_share, epv_per_share, full_value_per_share, price):
+    """Greenwald's three layers per share, and how much of the price each
+    covers. growth_value is negative when the DCF is worth LESS than the
+    no-growth value: the forecast reinvests at returns below the cost of
+    capital, so growth destroys value. paid_for_growth is the part of the
+    price above the earning power value (zero if the price is below it)."""
+    growth_value = None if full_value_per_share is None or epv_per_share is None \
+        else full_value_per_share - epv_per_share
+    paid_for_growth = None if epv_per_share is None else max(price - max(epv_per_share, 0.0), 0.0)
+    return {
+        "ncav": ncav_per_share, "epv": epv_per_share, "growth_value": growth_value,
+        "paid_for_growth": paid_for_growth,
+        "paid_for_growth_share": paid_for_growth / price if paid_for_growth is not None and price > 0 else None,
+        "net_net": ncav_per_share is not None and ncav_per_share > 0 and price <= ncav_per_share * 2 / 3,
+    }
+
 if __name__ == "__main__":
     print("Running self-test with a simple hand-checkable example...\n")
 
@@ -2705,4 +2861,40 @@ if __name__ == "__main__":
     g_back = solve_utility_growth(u["value"], 1.0, 0.5, 0.10, 2, 0.10, 0.03, 0.10)
     assert abs(g_back - 0.05) < 1e-9, "Utility implied growth must round-trip!"
     print("Utility implied growth round-trips (5.00%)")
+
+    # Graham layer, by hand.
+    #   NCAV: 500 current assets - 300 liabilities - 20 preferred = 180
+    #   EPV: NOPAT 100 / 10% = 1,000 — and it IS the DCF's own terminal value
+    #   with zero growth; at RONIC = WACC, 3% growth adds exactly one year's
+    #   growth (100 x 1.03 / 0.10 = 1,030) and nothing more.
+    #   Graham number: sqrt(22.5 x 2 x 10) = sqrt(450) = 21.2132
+    assert graham_ncav(500, 300, 20) == 180, "NCAV mismatch!"
+    assert abs(earnings_power_value(100, 0.10) - 1000) < 1e-9, "EPV mismatch!"
+    assert abs(terminal_value_consistent(100, 0.0, 0.10) - earnings_power_value(100, 0.10)) < 1e-9, \
+        "EPV must equal the zero-growth consistent terminal value!"
+    assert abs(terminal_value_consistent(100, 0.03, 0.10) - 1030) < 1e-9, "Growth at RONIC = WACC must add nothing!"
+    assert abs(graham_number(2, 10) - math.sqrt(450)) < 1e-12 and graham_number(-1, 10) is None, "Graham number!"
+    #   3-year averages: first (10+11+12)/3 = 11, last (14+15+16)/3 = 15 -> +36.36%
+    sa, ea, gr = three_year_average_growth([10, 11, 12, 13, 13, 13, 13, 14, 15, 16])
+    assert sa == 11 and ea == 15 and abs(gr - 4 / 11) < 1e-12, "Graham growth test mismatch!"
+    assert three_year_average_growth([1, 2, 3]) == (None, None, None), "Short history must not score!"
+    #   A clean defensive pass: CR 3, debt 50 <= NCA 200, 10 profitable
+    #   years, 20 dividend years, +36% growth, P/E 150/15 = 10, P/B 1.0.
+    checks = graham_defensive_checklist(300, 100, 50, [10, 11, 12, 13, 13, 13, 13, 14, 15, 16],
+                                        [(y, True) for y in range(2006, 2026)], 150, 150)
+    assert all(c["status"] == "pass" for c in checks), f"Defensive pass case failed: {checks}"
+    #   Only 7 years on file, a dividend gap, P/E 147/14.67 = 10.0 but P/B 3 -> P/E x P/B 30.
+    checks = {c["test"]: c["status"] for c in graham_defensive_checklist(
+        None, None, 0, [10, 11, 12, 13, 14, 15, 15], [(2019, True), (2020, False), (2021, True)], 147, 49)}
+    assert checks["Current ratio >= 2"] == "n/a" and checks["Earnings positive each of 10 years"] == "can't verify"
+    assert checks["Dividends uninterrupted 20 years"] == "fail"
+    assert checks["Earnings up >= 1/3 over 10 years (3-yr averages)"] == "can't verify"
+    assert checks["P/B <= 1.5, or P/E x P/B <= 22.5"] == "fail"
+    layers = graham_value_layers(12.0, 40.0, 55.0, 50.0)
+    assert layers["growth_value"] == 15.0 and layers["paid_for_growth"] == 10.0 and not layers["net_net"]
+    assert abs(layers["paid_for_growth_share"] - 0.2) < 1e-12, "Graham layer split mismatch!"
+    assert graham_value_layers(30.0, 10.0, 8.0, 19.0)["net_net"], "Price <= 2/3 NCAV is a net-net!"
+    assert graham_value_layers(12.0, 40.0, 35.0, 30.0)["paid_for_growth"] == 0.0
+    print("\nGraham layer: NCAV 180, EPV 1,000 = zero-growth terminal value, Graham number 21.21, "
+          "checklist and layers check out")
     print("\n✓ All self-tests passed. The math is internally consistent.")

@@ -35,6 +35,7 @@ python3 valuation.py ARM --narrative
 | `--financial` | Banks and brokers | Excess return model: book equity + PV of (ROE − cost of equity) × book equity. |
 | `--utility` | Regulated electric, gas and water utilities | Damodaran's two-stage dividend model from fundamentals: growth = retention × normalized ROE; stable payout = 1 − g / ROE. |
 | `--project` | Pre-production miners and plants | Project NPV from the technical report's timing, capex, output, price and margin, with a failure probability. |
+| `--graham` | Any (adds a section; combine with any mode except `--financial`/`--project`) | Benjamin Graham's view beside the DCF. Splits value into net current assets (his liquidation floor), earning power (today's normalized NOPAT / WACC, i.e. the DCF with zero growth) and growth (the DCF minus that), and shows how much of the price pays for growth. Runs his defensive-investor checklist on 10+ years of EDGAR data, marking tests whose history predates EDGAR as "can't verify". Reported figures only: no prompts, and no other number changes. His `EPS × (8.5 + 2g)` formula is deliberately left out (a guessed growth rate in 1962-calibrated constants). |
 | `--stage young\|growth\|mature\|N,M` | Any (standard model) | Sets the high-growth and fade years. |
 
 Modes combine, e.g. `--narrative --cyclical` or `--biotech --narrative`.

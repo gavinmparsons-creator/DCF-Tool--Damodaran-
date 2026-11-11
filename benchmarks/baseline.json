@@ -15,6 +15,24 @@
     "ebit": 169605166666.66666,
     "erp": 0.042,
     "fcff": 127441765773.71814,
+    "graham": {
+      "epv_per_share": 80.54768122007353,
+      "graham_number": 33.72033331036654,
+      "growth_value": 10.562442538861688,
+      "ncav_per_share": -8.594157026949079,
+      "paid_for_growth_share": 0.769144818950235,
+      "tangible_book_per_share": 7.337873733701519,
+      "tests": {
+        "Current ratio >= 2": "fail",
+        "Dividends uninterrupted 20 years": "fail",
+        "Earnings positive each of 10 years": "pass",
+        "Earnings up >= 1/3 over 10 years (3-yr averages)": "pass",
+        "Long-term debt <= net current assets": "fail",
+        "P/B <= 1.5, or P/E x P/B <= 22.5": "fail",
+        "P/E <= 15 on 3-year average earnings": "fail"
+      },
+      "tests_passed": 2
+    },
     "return_on_new_capital": null,
     "revenue": 466823000000,
     "risk_free_rate": 0.049800000000000004,
@@ -45,6 +63,24 @@
     "ebit": 28405390507.887947,
     "erp": 0.0475,
     "fcff": 17523227377.299805,
+    "graham": {
+      "epv_per_share": 123.76225316827404,
+      "graham_number": 98.5728452969517,
+      "growth_value": 5.229367706386114,
+      "ncav_per_share": -14.354501430140475,
+      "paid_for_growth_share": 0.0,
+      "tangible_book_per_share": 50.75629916734349,
+      "tests": {
+        "Current ratio >= 2": "fail",
+        "Dividends uninterrupted 20 years": "fail",
+        "Earnings positive each of 10 years": "pass",
+        "Earnings up >= 1/3 over 10 years (3-yr averages)": "pass",
+        "Long-term debt <= net current assets": "pass",
+        "P/B <= 1.5, or P/E x P/B <= 22.5": "fail",
+        "P/E <= 15 on 3-year average earnings": "fail"
+      },
+      "tests_passed": 3
+    },
     "return_on_new_capital": null,
     "revenue": 153663103700.0,
     "risk_free_rate": 0.049800000000000004,
@@ -75,6 +111,24 @@
     "ebit": 2729420892.250559,
     "erp": 0.042,
     "fcff": 2595149176.8282776,
+    "graham": {
+      "epv_per_share": 17.333574355767418,
+      "graham_number": null,
+      "growth_value": -10.539833325473744,
+      "ncav_per_share": -33.92616950425026,
+      "paid_for_growth_share": 0.48442669970947594,
+      "tangible_book_per_share": 9.493209920979746,
+      "tests": {
+        "Current ratio >= 2": "fail",
+        "Dividends uninterrupted 20 years": "can't verify",
+        "Earnings positive each of 10 years": "fail",
+        "Earnings up >= 1/3 over 10 years (3-yr averages)": "can't verify",
+        "Long-term debt <= net current assets": "fail",
+        "P/B <= 1.5, or P/E x P/B <= 22.5": "fail",
+        "P/E <= 15 on 3-year average earnings": "fail"
+      },
+      "tests_passed": 0
+    },
     "narrative": {
       "base": 6.793741030293674,
       "high": 11.231515953097436,
@@ -148,6 +202,24 @@
     "ebit": 15404158000.0,
     "erp": 0.042,
     "fcff": 11954222066.26128,
+    "graham": {
+      "epv_per_share": 34.14834159078608,
+      "graham_number": 22.78459940689946,
+      "growth_value": 2.986027654202033,
+      "ncav_per_share": -8.63733910635841,
+      "paid_for_growth_share": 0.6321014696101478,
+      "tangible_book_per_share": 5.092626332332657,
+      "tests": {
+        "Current ratio >= 2": "fail",
+        "Dividends uninterrupted 20 years": "can't verify",
+        "Earnings positive each of 10 years": "pass",
+        "Earnings up >= 1/3 over 10 years (3-yr averages)": "pass",
+        "Long-term debt <= net current assets": "fail",
+        "P/B <= 1.5, or P/E x P/B <= 22.5": "fail",
+        "P/E <= 15 on 3-year average earnings": "fail"
+      },
+      "tests_passed": 2
+    },
     "return_on_new_capital": null,
     "revenue": 51054000000,
     "risk_free_rate": 0.049800000000000004,
@@ -262,6 +334,24 @@
     "ebit": -262918493.0,
     "erp": 0.042,
     "fcff": -1127191534.3846455,
+    "graham": {
+      "epv_per_share": null,
+      "graham_number": null,
+      "growth_value": null,
+      "ncav_per_share": -7.564634176618089,
+      "paid_for_growth_share": null,
+      "tangible_book_per_share": -0.3511209315027682,
+      "tests": {
+        "Current ratio >= 2": "fail",
+        "Dividends uninterrupted 20 years": "fail",
+        "Earnings positive each of 10 years": "fail",
+        "Earnings up >= 1/3 over 10 years (3-yr averages)": "fail",
+        "Long-term debt <= net current assets": "fail",
+        "P/B <= 1.5, or P/E x P/B <= 22.5": "fail",
+        "P/E <= 15 on 3-year average earnings": "fail"
+      },
+      "tests_passed": 0
+    },
     "return_on_new_capital": null,
     "revenue": 5434647000,
     "risk_free_rate": 0.049800000000000004,
