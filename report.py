@@ -161,13 +161,44 @@ def money(x):
     return "n/a" if x is None else f"${x:,.2f}"
 
 
-def history(facts):
-    """Revenue by year, 5-year growth, and margin over the cycle."""
+def structural_break(facts):
+    """The first fiscal year after revenue fell by more than half in one
+    year and never got back to where it was: a spin-off, a divestiture or
+    a restatement to continuing operations (Western Digital's FY2023,
+    restated without the flash business it spun off as SanDisk), not a
+    trough. Returns (fiscal_year, before, after) or None."""
+    series = valuation.annual_revenue_series(facts, 10)
+    for i in range(len(series) - 1, 0, -1):
+        before, after = series[i - 1]["val"], series[i]["val"]
+        if before > 0 and after < 0.5 * before and max(e["val"] for e in series[i:]) < before:
+            return series[i]["fiscal_year"], before, after
+    return None
+
+
+def history(facts, mode="standard"):
+    """Revenue by year, 5-year growth, and margin over the cycle. Outside
+    cyclical mode, a structural break (structural_break) restarts the
+    record: growth and margins measured across a spin-off compare two
+    different companies. A cyclical's collapse is kept: troughs are part
+    of its cycle."""
     revenue = valuation.get_annual_series(facts, valuation.METRIC_TAGS["revenue"], 6)
     cagr, span = valuation.trailing_revenue_cagr(facts)
     rows = valuation.cycle_margin_history(facts)
+    brk = structural_break(facts) if mode != "cyclical" else None
+    note = None
+    if brk:
+        year, before, after = brk
+        post = [e for e in valuation.annual_revenue_series(facts, 10) if e["fiscal_year"] >= year]
+        note = (f"Revenue fell from ${before / 1e9:,.2f}B to ${after / 1e9:,.2f}B in FY{year} and never "
+                "recovered: a spin-off, divestiture or restatement, not a downturn. Growth and margins are "
+                f"measured from FY{year} on, so they describe the company that exists now.")
+        if len(post) >= 2 and post[0]["val"] > 0:
+            n = post[-1]["fiscal_year"] - post[0]["fiscal_year"]
+            cagr = (post[-1]["val"] / post[0]["val"]) ** (1 / n) - 1
+            span = f"FY{post[0]['fiscal_year']}-FY{post[-1]['fiscal_year']}"
+        rows = [r for r in rows if r.get("fiscal_year", year) >= year]
     stats = valuation.cycle_stats_or_none(rows)
-    return revenue, cagr, span, rows, stats
+    return revenue, cagr, span, rows, stats, note
 
 
 def company_report(ticker):
@@ -236,7 +267,7 @@ def company_report(ticker):
         return "\n".join(lines)
 
     facts = valuation.fetch_json(valuation.EDGAR_FACTS_URL.format(cik=cik))
-    revenue, cagr, span, cycle_rows, stats = history(facts)
+    revenue, cagr, span, cycle_rows, stats, break_note = history(facts, mode)
     start_growth = min(max(cagr if cagr is not None else 0.05, -0.05), 0.40)
 
     def answers(prompt, printed):
@@ -271,6 +302,8 @@ def company_report(ticker):
 
     # 1. The record
     lines += ["## 1. The record", ""]
+    if break_note:
+        lines += [f"> ⚠ {break_note}", ""]
     if revenue:
         lines += ["| Year | Revenue |", "|---|---|"] + [
             f"| FY{e['fiscal_year']} | {'$' if e['unit'] == 'USD' else e['unit'] + ' '}{e['val'] / 1e9:,.2f}B |"
