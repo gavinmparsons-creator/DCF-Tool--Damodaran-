@@ -1058,31 +1058,65 @@ def trailing_twelve_months(facts_json, tag, unit, annual_end, annual_val):
     return annual_val + current["val"] - prior_ytd["val"], current["end"]
 
 
+def three_month_quarters(facts_json, tag, unit):
+    """
+    {end_date: value} for every three-month quarter of a flow `tag`,
+    including each fiscal fourth quarter, which no 10-Q reports: it's
+    derived exactly as the 10-K's full year minus that year's three
+    10-Q quarters (only when all three are filed). Without it the
+    quarterly history skips a quarter a year — Sandisk's July 2026
+    quarter ($7.0B of operating income in a steady ramp) went missing,
+    so its next quarter looked like a one-off against the older ones.
+    """
+    entries = _all_taxonomy_tags(facts_json).get(tag, {}).get("units", {}).get(unit, [])
+    quarters, years = {}, {}
+    for e in entries:
+        if not (e.get("start") and e.get("end")):
+            continue
+        days = _days(e["start"], e["end"])
+        if 80 < days < 100:
+            quarters[e["end"]] = e["val"]
+        elif 350 < days < 380 and e.get("form") in ("10-K", "10-K/A"):
+            years[e["end"]] = (e["start"], e["val"])
+    for year_end, (year_start, year_val) in years.items():
+        if year_end in quarters:
+            continue
+        inside = [end for end in quarters
+                  if _days(year_start, end) > 0 and _days(end, year_end) > 30]
+        if len(inside) == 3:
+            quarters[year_end] = year_val - sum(quarters[end] for end in inside)
+    return quarters
+
+
+def _median(values):
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    return ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+
+
 def quarterly_spike(facts_json, tag, unit):
     """
-    (latest, typical, end_date) when the latest tagged three-month quarter of
-    `tag` is far out of line with the four before it — more than three times
-    their median and at least twice the median's size above it, or a
-    profit/loss flip worth more than three median quarters; else None. Needs
-    at least three earlier quarters within the last ~15 months.
+    (latest, typical, end_date, prior_ends) when the latest three-month
+    quarter of `tag` is far out of line with the four before it (fiscal
+    fourth quarters included — see three_month_quarters) — more than three
+    times their median and at least twice the median's size above it, or
+    a profit/loss flip worth more than three median quarters; else None.
+    Needs at least three earlier quarters within the last ~15 months.
     """
-    quarters = {}
-    for e in _all_taxonomy_tags(facts_json).get(tag, {}).get("units", {}).get(unit, []):
-        if e.get("start") and e.get("end") and 80 < _days(e["start"], e["end"]) < 100:
-            quarters[e["end"]] = e["val"]
+    quarters = three_month_quarters(facts_json, tag, unit)
     ends = sorted(quarters)
     if len(ends) < 4:
         return None
     latest_end = ends[-1]
-    prior = [quarters[e] for e in ends[-5:-1] if 0 < _days(e, latest_end) <= 460]
-    if len(prior) < 3:
+    prior_ends = [e for e in ends[-5:-1] if 0 < _days(e, latest_end) <= 460]
+    if len(prior_ends) < 3:
         return None
-    typical = sorted(prior)[len(prior) // 2] if len(prior) % 2 else sum(sorted(prior)[len(prior) // 2 - 1:len(prior) // 2 + 1]) / 2
+    typical = _median([quarters[e] for e in prior_ends])
     latest = quarters[latest_end]
     gap = latest - typical
     if abs(gap) <= 3 * max(abs(typical), 1.0) or abs(gap) < 2 * abs(typical):
         return None
-    return latest, typical, latest_end
+    return latest, typical, latest_end, prior_ends
 
 
 def _period_label(start, end):
@@ -3680,12 +3714,23 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
     if not (financial or project) and oi_info.get("ttm") and oi_info.get("tag") and "+" not in oi_info["tag"]:
         spike = quarterly_spike(facts, oi_info["tag"], oi_info["unit"])
         if spike:
-            latest, typical, end = (x * (fx_rate if fx_currency and oi_info["unit"] == fx_currency else 1)
-                                    if isinstance(x, (int, float)) else x for x in spike)
+            oi_fx = fx_rate if fx_currency and oi_info["unit"] == fx_currency else 1
+            latest, typical, end, prior_ends = spike[0] * oi_fx, spike[1] * oi_fx, spike[2], spike[3]
             adjusted = ebit - latest + typical
             print(f"\n  ⚠ The quarter ending {end} had operating income of ${latest:,.0f}, far from its typical")
             print(f"  ${typical:,.0f} a quarter (median of the four before) — usually a one-time item")
             print("  (a gain on a sale, a licensing payment, an impairment). Check the 10-Q.")
+            # Revenue for the same quarters, so a real ramp (revenue up in step) is
+            # visible next to a one-off (revenue flat while operating income jumps).
+            rev_info = financials.get("revenue", {})
+            if rev_info.get("tag") and "+" not in rev_info["tag"]:
+                rev_q = three_month_quarters(facts, rev_info["tag"], rev_info["unit"])
+                if end in rev_q and all(e in rev_q for e in prior_ends):
+                    rev_fx = fx_rate if fx_currency and rev_info["unit"] == fx_currency else 1
+                    rev_latest, rev_typical = rev_q[end] * rev_fx, _median([rev_q[e] for e in prior_ends]) * rev_fx
+                    print(f"  Revenue that quarter: ${rev_latest:,.0f} vs a typical ${rev_typical:,.0f}"
+                          + (f" ({rev_latest / rev_typical:.1f}x)" if rev_typical > 0 else "")
+                          + " — if revenue rose in step, it's more likely the business than a one-off.")
             keep = input(f"  Press Enter to use TTM with that quarter at its typical level (${adjusted:,.0f}),\n"
                          f"  or type k to keep the reported TTM (${ebit:,.0f}): ").strip().lower()
             if keep != "k":
