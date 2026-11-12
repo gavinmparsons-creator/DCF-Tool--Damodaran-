@@ -47,6 +47,12 @@ REPORT_DIR = os.path.join(HERE, "reports")
 # average margin over the cycle (Damodaran), not the latest year.
 BANK_SIC = set(range(6020, 6040)) | {6211}
 REIT_SIC = {6798}
+# Other balance-sheet financials: consumer and mortgage lenders, insurance
+# carriers (mortgage insurers file as 6351 surety, reinsurers as 6331).
+# Debt is their raw material, not financing, so they're valued on book
+# equity and its return like banks. Brokers (6411) sell a service, not a
+# balance sheet, and stay on the standard model.
+FINANCIAL_SIC = {6141, 6153, 6159, 6162, 6163, 6199} | set(range(6311, 6400))
 # Regulated electric, gas and water utilities: the dividend model from
 # fundamentals. Merchant generators share code 4911 but sell power at
 # market prices and pay little out, so they stay on the standard model.
@@ -65,6 +71,8 @@ def pick_mode(cik, ticker=""):
         return "utility", sic
     if sic in BANK_SIC:
         return "bank", sic
+    if sic in FINANCIAL_SIC:
+        return "financial", sic
     if sic in REIT_SIC:
         return "reit", sic
     if sic in CYCLICAL_SIC:
@@ -221,16 +229,54 @@ def company_report(ticker):
                           "model instead of the utility dividend model.")
             lines[-2] = lines[-2].replace("valued as **utility**", "valued as **standard**")
             mode = "standard"
-    if mode in ("bank", "reit", "utility"):
-        flags = {"bank": {"financial": True}, "reit": {"reit": True}, "utility": {"utility": True}}[mode]
-        answers = (lambda p, _t: "0.76" if "type a beta to use as is" in p else "")
+    if mode in ("bank", "reit", "utility", "financial"):
+        flags = {"bank": {"financial": True}, "reit": {"reit": True}, "utility": {"utility": True},
+                 "financial": {"financial": True}}[mode]
+
+        def answers(p, printed):
+            if mode == "bank" and "type a beta to use as is" in p:
+                return "0.76"
+            if mode == "financial" and "Stable ROE the firm converges to" in p:
+                # The firm's own five-year record, not the industry average:
+                # Damodaran's industry ROE for insurers (19%) is above what
+                # most of them have ever earned.
+                avg = re.findall(r"5-yr average (-?[\d.]+)%", printed)
+                return avg[-1] if avg else ""
+            return ""
         if summary is None:
             summary, text, _ = run_capture(ticker, flags, answers)
         price = summary.get("share_price") or _num(r"Current market price: \$([\d,]+\.?\d*)", text) \
             or _num(r"share price=\$([\d,]+\.?\d*)", text)
         warnings, _cap = screener.run_warnings(text, {"book_equity", "shares_outstanding"}, ticker, price)
         lines += [f"**Price:** {money(price)}", ""]
-        if mode == "bank":
+        if mode == "financial":
+            er = summary.get("excess_return", {})
+            implied = _num(r"implies a stable ROE of (-?[\d.]+)%", text, 0.01)
+            avg = _num(r"5-yr average (-?[\d.]+)%", text, 0.01)
+            table = re.findall(r"  FY(\d{4})\s+([\d,-]+)\s+([\d,]+)\s+(-?[\d.]+)%", text)
+            coe, book = summary.get("cost_of_equity"), er.get("common_book_equity")
+            lines += ["## Return on equity", "",
+                      "| Year | Return on equity |", "|---|---|"] + [f"| FY{y} | {r}% |" for y, _ni, _eq, r in table] + [
+                      "", f"Latest year **{pct(er.get('current_roe'))}**, five-year average **{pct(avg)}**. The model "
+                      f"fades the return to its own five-year average (not the industry's). The price implies a "
+                      f"long-run return of **{pct(implied)}** against a cost of equity of {pct(coe)}.", ""]
+            if book and _cap and price and avg is not None:
+                bps = book / (_cap / price)
+                lines += ["## Price to book", "",
+                          f"Book value per share **{money(bps)}**; price / book **{price / bps:.2f}x**. "
+                          "A firm earning a steady return on equity is worth (ROE − g) / (cost of equity − g) times "
+                          "book (Damodaran), at 2.5% growth:", "",
+                          "| Cost of equity | Fair price / book | Value per share | x price |", "|---|---|---|---|"]
+                for k in sorted({round(coe, 4), 0.10, 0.12}):
+                    fair = (avg - 0.025) / (k - 0.025)
+                    lines.append(f"| {pct(k)} | {fair:.2f}x | {money(fair * bps)} | {fair * bps / price:.2f}x |")
+                lines.append("")
+            lines += ["## Value (excess return model, industry beta)", "",
+                      f"Low {money(er.get('low'))} · **Base {money(er.get('base'))}** · High {money(er.get('high'))}"
+                      + (f" ({er['base'] / price:.2f}x the price)" if er.get("base") and price else ""), "",
+                      "*The five-year record may be a good-credit or hard-market stretch: ask what one bad year "
+                      "(a recession's defaults, a major catastrophe) does to book value.*", ""]
+        elif mode == "bank":
             er = summary.get("excess_return", {})
             implied = _num(r"implies a stable ROE of (-?[\d.]+)%", text, 0.01)
             table = re.findall(r"  FY(\d{4})\s+([\d,-]+)\s+([\d,]+)\s+(-?[\d.]+)%", text)
