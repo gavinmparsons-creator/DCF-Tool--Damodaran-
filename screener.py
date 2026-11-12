@@ -73,6 +73,10 @@ SECTORS = {
                 "about": "nuclear power and adjacent: utilities with reactors, uranium, fuel, reactor "
                          "suppliers, and pre-revenue developers",
                 "needs": {"revenue", "operating_income", "cash", "shares_outstanding", "book_equity"}},
+    "mortgage": {"universe": "theme", "flags": {"financial": True},
+                 "about": "mortgage originators and servicers, mortgage insurers and reinsurers "
+                          "(excess return model)",
+                 "needs": {"book_equity", "shares_outstanding"}},
     "smallcap": {"universe": "cap", "min_cap": 3e8, "max_cap": 2e9, "exclude_sic": (6000, 6999),
                  "flags": {"insight": True},
                  "about": "listed operating companies from $300M to $2B, excluding financials and REITs",
@@ -83,6 +87,15 @@ SECTORS = {
 # view), "cyclical" (cycle-average margins, for commodity producers), or
 # "runway" (no revenue to value yet: cash, burn, and years of runway).
 THEMES = {
+    # Mortgage lenders, mortgage insurers and reinsurers: all valued on book
+    # equity and its return (Damodaran's excess return model), like banks.
+    "mortgage": {
+        "Mortgage originators & servicers": {
+            "mode": "financial", "tickers": ["RKT", "UWMC", "PFSI", "LDI", "GHLD", "FOA", "ONIT"]},
+        "Mortgage insurers": {"mode": "financial", "tickers": ["MTG", "ESNT", "RDN", "NMIH", "ACT"]},
+        "Reinsurers": {
+            "mode": "financial", "tickers": ["RNR", "EG", "ACGL", "RGA", "AXS", "SPNT", "HG", "FIHL", "GLRE"]},
+    },
     "nuclear": {
         "Regulated utilities with nuclear plants": {
             "mode": "utility",
@@ -495,6 +508,8 @@ def value_one(args):
                         r"(?: earnings growth)?", text) if flags.get("utility") else \
         re.search(r"implies a (?:stable ROE|high-growth-stage rate) of (-?[\d.]+)%", text)
     row["price_implies"] = float(implied.group(1)) / 100 if implied else None
+    avg_roe = re.search(r"5-yr average (-?[\d.]+)%", text)
+    row["avg_roe"] = float(avg_roe.group(1)) / 100 if avg_roe else None
     row["warnings"], row["market_cap"] = run_warnings(text, needs, ticker, row["price"])
     if flags.get("utility"):
         # The dividend model doesn't use free cash flow or depreciation: a
@@ -630,6 +645,8 @@ def main():
                 return {"runway": True}, spec["needs"]
             if mode == "utility":
                 return {"utility": True}, {"cash", "shares_outstanding", "book_equity"}
+            if mode == "financial":
+                return {"financial": True}, SECTORS["banks"]["needs"]
             return dict(spec["flags"], cyclical=mode == "cyclical"), spec["needs"]
         def sector_flags(ticker, sic):
             if spec["flags"].get("utility") and ticker in MERCHANT_GENERATORS:
@@ -658,7 +675,7 @@ def main():
     fields = ["ticker", "name", "group", "sic", "market_cap", "price", "low", "base", "high", "value_to_price",
               "record_value", "record_to_price", "hist_growth", "implied_growth", "expectations_gap", "margin_now",
               "price_implies",
-              "roe", "stable_roe", "cost_of_equity", "wacc", "book_equity",
+              "roe", "avg_roe", "stable_roe", "cost_of_equity", "wacc", "book_equity",
               "cash", "debt", "burn", "runway_years", "ev", "ev_to_cash", "warnings", "error"]
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
