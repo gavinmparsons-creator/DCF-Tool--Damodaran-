@@ -61,6 +61,13 @@ MERCHANT_GENERATORS = screener.MERCHANT_GENERATORS
 CYCLICAL_SIC = (list(range(1000, 1500)) + list(range(2800, 2830)) + list(range(2860, 2900))
                 + list(range(2900, 3000)) + list(range(3310, 3400)) + [1531, 1520, 6552]
                 + list(range(3711, 3717)) + list(range(4400, 4500)) + list(range(3530, 3540)))
+# Memory chipmakers file under 3674 (all semiconductors, NVIDIA included)
+# but run on a boom-bust price cycle: Micron went from a $5.7B operating
+# loss in FY2023 to $99B of operating income in FY2026. Valued on
+# cycle-average margins, by ticker since their SEC code can't tell them apart.
+# Not SanDisk: spun off in 2025, it has four years of its own history (three
+# of them losses), not a full cycle, so its "cycle average" would be 2.6%.
+CYCLICAL_TICKERS = {"MU"}
 NEEDS = {"revenue", "operating_income", "cash", "shares_outstanding", "book_equity"}
 
 
@@ -75,7 +82,7 @@ def pick_mode(cik, ticker=""):
         return "financial", sic
     if sic in REIT_SIC:
         return "reit", sic
-    if sic in CYCLICAL_SIC:
+    if sic in CYCLICAL_SIC or ticker.upper() in CYCLICAL_TICKERS:
         return "cyclical", sic
     return "standard", sic
 
