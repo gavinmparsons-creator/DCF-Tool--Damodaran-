@@ -2685,11 +2685,19 @@ def get_sic(cik):
         return None, None
 
 
-def suggest_industry(sic, biotech=False):
+# Companies whose SEC code points at the wrong industry (or none). Enact, a
+# mortgage insurer, files as 6411 (insurance agents, unmapped) — without this
+# it falls back to its own regression beta instead of its peers' industry.
+TICKER_INDUSTRY = {"ACT": "Insurance (General)"}
+
+
+def suggest_industry(sic, biotech=False, ticker=""):
     """First SIC_TO_DAMODARAN_INDUSTRY match for this code, or None. In
     --biotech mode, any drug-manufacturing code suggests Biotechnology —
     a clinical-stage company's risk looks like biotech's, not big pharma's,
-    whatever its SIC code says."""
+    whatever its SIC code says. A TICKER_INDUSTRY entry wins over the code."""
+    if ticker.upper() in TICKER_INDUSTRY:
+        return TICKER_INDUSTRY[ticker.upper()]
     if sic is None:
         return None
     if biotech and 2830 <= sic <= 2836:
@@ -2713,7 +2721,8 @@ def load_industry_map():
 def save_industry_choice(ticker, industries, sic):
     """Remember this ticker's industry mix so every later run uses the
     same beta without asking again. Kept in data/industry_map.json, which
-    is meant to be committed — it's a record of your judgment calls."""
+    stays local (data/ is git-ignored); a fix every clone needs belongs in
+    TICKER_INDUSTRY instead."""
     saved = load_industry_map()
     saved[ticker.upper()] = {"industries": industries, "sic": sic}
     try:
@@ -2754,7 +2763,7 @@ def choose_industries(ticker, sic, sic_description, industries, biotech=False):
     """
     saved = load_industry_map().get(ticker.upper())
     saved_mix = saved["industries"] if saved and all(n in industries for n, _ in saved["industries"]) else None
-    suggestion = suggest_industry(sic, biotech)
+    suggestion = suggest_industry(sic, biotech, ticker)
     if sic is not None:
         print(f"  SEC industry code: {sic} {sic_description}")
     if saved_mix:

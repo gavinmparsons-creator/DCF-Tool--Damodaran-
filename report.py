@@ -58,6 +58,10 @@ FINANCIAL_SIC = {6141, 6153, 6159, 6162, 6163, 6199} | set(range(6311, 6400))
 # market prices and pay little out, so they stay on the standard model.
 UTILITY_SIC = {4911, 4924, 4931, 4932, 4939, 4941}
 MERCHANT_GENERATORS = screener.MERCHANT_GENERATORS
+# Companies whose SEC code sends them to the wrong mode. Enact, a mortgage
+# insurer like ESNT/MTG/NMIH/RDN (6351), files as 6411 (insurance agents),
+# which would value its balance sheet as if it were a broker's.
+MODE_OVERRIDES = {"ACT": "financial"}
 CYCLICAL_SIC = (list(range(1000, 1500)) + list(range(2800, 2830)) + list(range(2860, 2900))
                 + list(range(2900, 3000)) + list(range(3310, 3400)) + [1531, 1520, 6552]
                 + list(range(3711, 3717)) + list(range(4400, 4500)) + list(range(3530, 3540)))
@@ -74,6 +78,8 @@ NEEDS = {"revenue", "operating_income", "cash", "shares_outstanding", "book_equi
 def pick_mode(cik, ticker=""):
     sic, _ = valuation.get_sic(cik)
     sic = int(sic) if sic else 0
+    if ticker.upper() in MODE_OVERRIDES:
+        return MODE_OVERRIDES[ticker.upper()], sic
     if sic in UTILITY_SIC and ticker.upper() not in MERCHANT_GENERATORS:
         return "utility", sic
     if sic in BANK_SIC:
