@@ -171,6 +171,14 @@ METRIC_TAGS = {
         # below, as a bare last-resort fallback for filers who tag ONLY that.
         ["Depreciation", "AmortizationOfIntangibleAssets"],
         ["DepreciationExpense", "AmortisationExpense"],  # ifrs-full (British spelling), same split-tag pattern
+        ["AdjustmentsForDepreciationExpense", "AdjustmentsForAmortisationExpense"],  # ifrs-full: the same split, as cash-flow add-backs
+        # Depreciation alone: filers with no amortization line to pair it with
+        # (Frontline — a tanker fleet is all depreciation). Listed after the
+        # pairs above so a filer that tags both still gets the sum (ties go to
+        # the earlier recipe); this only wins when the pair can't resolve.
+        "AdjustmentsForDepreciationExpense",  # ifrs-full, cash-flow add-back
+        "DepreciationExpense",  # ifrs-full, income statement
+        "Depreciation",  # us-gaap (Frontline before its 2022 switch to IFRS)
         "OtherDepreciationAndAmortization",
     ],
     "capex": [
@@ -238,6 +246,8 @@ METRIC_TAGS = {
     "dividends_per_share": [
         "CommonStockDividendsPerShareDeclared",
         "CommonStockDividendsPerShareCashPaid",
+        "DividendsPaidOrdinarySharesPerShare",  # ifrs-full: e.g. Frontline from FY2022
+        "DividendsRecognisedAsDistributionsToOwnersPerShare",  # ifrs-full
     ],
     "rd_expense": [
         "ResearchAndDevelopmentExpense",  # shared tag name across us-gaap and ifrs-full
@@ -945,7 +955,7 @@ def choose_cycle_margin(rows):
 
 def trailing_dividend_growth_rate(facts_json, years=6):
     """
-    Average year-over-year dividend-per-share growth over the trailing
+    Compound annual dividend-per-share growth over the trailing
     window. This is the standard Gordon Growth Model input for a
     capital-intensive, dividend-paying business (utilities, REITs) where
     nearly all earnings get reinvested into a growing rate base rather
@@ -969,15 +979,20 @@ def trailing_dividend_growth_rate(facts_json, years=6):
     if len(series) < 2:
         return None, None, None, 0, None
 
-    growth_rates = []
-    for prev, curr in zip(series, series[1:]):
-        if prev["val"] > 0:
-            growth_rates.append(curr["val"] / prev["val"] - 1)
-
-    if not growth_rates:
+    # Compound (geometric) growth from the first year with a dividend to the
+    # latest, not the average of year-over-year changes: that average is
+    # biased up and one restart year swamps it (Frontline, a variable payer:
+    # $0.15 -> $2.87 is +1,813%, which averaged to "407% growth" and a DDM at
+    # 2x the price). Damodaran's rule for historical growth is the geometric mean.
+    first = next((e for e in series[:-1] if e["val"] > 0), None)
+    if first is None:
         return series[-1]["val"], None, None, 0, series[-1]["unit"]
-    year_range = f"FY{series[0]['fiscal_year']}-FY{series[-1]['fiscal_year']}"
-    return series[-1]["val"], sum(growth_rates) / len(growth_rates), year_range, len(growth_rates), series[-1]["unit"]
+    n_years = int(series[-1]["end"][:4]) - int(first["end"][:4])
+    if n_years < 1:
+        return series[-1]["val"], None, None, 0, series[-1]["unit"]
+    growth = (series[-1]["val"] / first["val"]) ** (1 / n_years) - 1
+    year_range = f"FY{first['fiscal_year']}-FY{series[-1]['fiscal_year']}"
+    return series[-1]["val"], growth, year_range, n_years, series[-1]["unit"]
 
 
 def freshest_annual_value(facts_json, tag_candidates):
