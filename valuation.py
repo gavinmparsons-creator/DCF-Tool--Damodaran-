@@ -790,6 +790,44 @@ def trailing_revenue_cagr(facts_json, years=5):
     return cagr, f"FY{oldest['fiscal_year']}-FY{newest['fiscal_year']}"
 
 
+def structural_break(facts):
+    """The first fiscal year after revenue fell by more than half in one
+    year and never got back to where it was: a spin-off, a divestiture or
+    a restatement to continuing operations (Western Digital's FY2023,
+    restated without the flash business it spun off as SanDisk), not a
+    trough. Returns (fiscal_year, before, after) or None."""
+    series = annual_revenue_series(facts, 10)
+    for i in range(len(series) - 1, 0, -1):
+        before, after = series[i - 1]["val"], series[i]["val"]
+        if before > 0 and after < 0.5 * before and max(e["val"] for e in series[i:]) < before:
+            return series[i]["fiscal_year"], before, after
+    return None
+
+
+def growth_evidence(facts, cyclical=False):
+    """{label: growth} from the company's own filings: the multi-year rate,
+    the latest fiscal year, and this year so far (only if it's newer than
+    that fiscal year). Years before a spin-off or divestiture are left out
+    (structural_break), except for a cyclical, whose collapses are its cycle."""
+    series = annual_revenue_series(facts, 5)
+    brk = None if cyclical else structural_break(facts)
+    if brk:
+        series = [e for e in series if e["fiscal_year"] >= brk[0]]
+    out = {}
+    if len(series) >= 2 and series[0]["val"] > 0:
+        n = series[-1]["fiscal_year"] - series[0]["fiscal_year"]
+        if n > 0:
+            out[f"FY{series[0]['fiscal_year']}-FY{series[-1]['fiscal_year']} a year"] = \
+                (series[-1]["val"] / series[0]["val"]) ** (1 / n) - 1
+    if len(series) >= 2 and series[-2]["val"] > 0:
+        out[f"FY{series[-1]['fiscal_year']}"] = series[-1]["val"] / series[-2]["val"] - 1
+    ytd, label = year_to_date_growth(facts, [t for t in METRIC_TAGS["revenue"] if isinstance(t, str)])
+    ended = re.search(r"to (\d{4}-\d{2}-\d{2})", label or "")
+    if ytd is not None and ended and (not series or ended.group(1) > series[-1]["end"]):
+        out[label] = ytd
+    return out
+
+
 # Interest-expense tags that hold a plain positive expense magnitude —
 # the signed net-interest tags are left out, since a net figure can't be
 # turned back into gross expense (see NET_INTEREST_TAGS).
@@ -3601,7 +3639,8 @@ def non_common_security(ticker):
 
 
 def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, reit=False,
-                       cyclical=False, financial=False, project=False, utility=False, graham=False):
+                       cyclical=False, financial=False, project=False, utility=False, graham=False,
+                       case=None):
     """
     Interactive valuation of one company. Prints the full build, and
     returns a summary dict of the key inputs and results (beta, ERP, WACC,
@@ -5350,10 +5389,34 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
             print(f"  Industry operating margin: {industry_margin:.1%}  ({' + '.join(n for n, _ in mix)}; Damodaran,")
             print(f"  {margin_updated}, lease & R&D adjusted — the same basis as the EBIT here).")
         print("  Pick the margin this business converges toward, not today's number.")
+        case_pick = None
+        if case:
+            growths = growth_evidence(facts, cyclical)
+            margins = {"today's margin": current_margin, "industry margin": industry_margin,
+                       "cycle margin": cycle_choice["margin"] if cycle_choice is not None else None}
+            case_pick = model.case_defaults(case, growths, margins)
+            print(f"\n  {case.upper()} CASE — defaults from the {'best' if case == 'bull' else 'worst'} of the evidence;"
+                  " type over any of them.")
+            print("  Growth seen: " + ("; ".join(f"{v:.1%} ({k})" for k, v in growths.items()) or "none on record"))
+            print("  Margins seen: " + "; ".join(f"{v:.1%} ({k})" for k, v in margins.items() if v is not None))
+            if case_pick["growth"] and case_pick["growth"][2]:
+                print(f"  ⚠ {case_pick['growth'][1]} growth is outside -20% to 40%, so it's held at "
+                      f"{case_pick['growth'][0]:.0%}. A 10-year story rarely sustains more; type your own if you"
+                      " believe it.")
+            print("  Cost of capital and failure odds don't change with the case (that would count the")
+            print("  same risk twice).")
+            summary["case"] = {"case": case, "growths": growths, "margins": margins, "picked": case_pick}
         growth_input = input(f"  Initial revenue growth rate, fading to {terminal_growth:.2%} (terminal) by "
-                              "year 10\n  (e.g. 30 for 30%; Enter for 0%): ").strip()
-        initial_growth = parse_number(growth_input) / 100 if growth_input else 0.0
-        if cycle_choice is not None:
+                              "year 10\n  (e.g. 30 for 30%; Enter for " + (
+                                  f"the {case} case's {case_pick['growth'][0]:.1%}, {case_pick['growth'][1]}): "
+                                  if case_pick and case_pick["growth"] else "0%): ")).strip()
+        initial_growth = parse_number(growth_input) / 100 if growth_input else (
+            case_pick["growth"][0] if case_pick and case_pick["growth"] else 0.0)
+        if case_pick and case_pick["margin"]:
+            default_target, source = case_pick["margin"]
+            margin_input = input(f"  Target (mature) operating margin (e.g. 20 for 20%; Enter for the {case} case's "
+                                 f"{default_target:.1%}, {source}): ").strip()
+        elif cycle_choice is not None:
             # Already normalized to the cycle average above, so that's the
             # natural default target too — a cyclical reverts to it.
             margin_input = input(f"  Target (mature) operating margin (e.g. 20 for 20%; Enter for the "
@@ -5371,8 +5434,9 @@ def run_full_valuation(ticker, stage_arg=None, narrative=False, biotech=False, r
         target_margin = parse_number(margin_input) / 100 if margin_input else default_target
         narrative_years = 10
         convergence_input = input(f"  Year the margin reaches that target, then holds (Ginzu's year of "
-                                  f"convergence;\n  e.g. 2 for fast cost cuts; Enter for year {narrative_years}): ").strip()
-        margin_convergence_years = int(parse_number(convergence_input)) if convergence_input else None
+                                  f"convergence;\n  e.g. 2 for fast cost cuts; Enter for year {case_pick['years'] if case_pick else narrative_years}): ").strip()
+        margin_convergence_years = int(parse_number(convergence_input)) if convergence_input else (
+            case_pick["years"] if case_pick else None)
         if margin_convergence_years is not None and not 1 <= margin_convergence_years <= narrative_years:
             print(f"  Must be 1-{narrative_years} — using year {narrative_years}.")
             margin_convergence_years = None
@@ -5755,7 +5819,19 @@ if __name__ == "__main__":
              "how much of the price pays for growth, his defensive-investor checklist and the Graham "
              "number. Reported figures only; adds no prompts and changes no other number.",
     )
+    cases = parser.add_mutually_exclusive_group()
+    cases.add_argument("--bull", action="store_true",
+                       help="Bull narrative: --narrative with the best of the company's own evidence as the defaults "
+                            "(highest observed growth, capped at 40%%; highest of today's, cycle and industry margin, "
+                            "by year 5). Every default is shown with its source and can be typed over.")
+    cases.add_argument("--bear", action="store_true",
+                       help="Bear narrative: the same with the worst of the evidence (lowest growth, lowest positive "
+                            "margin, by year 10).")
     args = parser.parse_args()
+    case = "bull" if args.bull else "bear" if args.bear else None
+    if case and (args.reit or args.financial or args.utility or args.project):
+        parser.error("--bull and --bear are narrative (revenue and margin) cases; they don't combine with "
+                     "--reit, --financial, --utility or --project")
 
-    run_full_valuation(args.ticker, args.stage, args.narrative, args.biotech, args.reit, args.cyclical,
-                       args.financial, args.project, args.utility, args.graham)
+    run_full_valuation(args.ticker, args.stage, args.narrative or bool(case), args.biotech, args.reit, args.cyclical,
+                       args.financial, args.project, args.utility, args.graham, case)

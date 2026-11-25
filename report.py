@@ -181,18 +181,7 @@ def money(x):
     return "n/a" if x is None else f"${x:,.2f}"
 
 
-def structural_break(facts):
-    """The first fiscal year after revenue fell by more than half in one
-    year and never got back to where it was: a spin-off, a divestiture or
-    a restatement to continuing operations (Western Digital's FY2023,
-    restated without the flash business it spun off as SanDisk), not a
-    trough. Returns (fiscal_year, before, after) or None."""
-    series = valuation.annual_revenue_series(facts, 10)
-    for i in range(len(series) - 1, 0, -1):
-        before, after = series[i - 1]["val"], series[i]["val"]
-        if before > 0 and after < 0.5 * before and max(e["val"] for e in series[i:]) < before:
-            return series[i]["fiscal_year"], before, after
-    return None
+structural_break = valuation.structural_break
 
 
 def history(facts, mode="standard"):

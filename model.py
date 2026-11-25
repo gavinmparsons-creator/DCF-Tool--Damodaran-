@@ -2024,6 +2024,42 @@ def graham_value_layers(ncav_per_share, epv_per_share, full_value_per_share, pri
         "net_net": ncav_per_share is not None and ncav_per_share > 0 and price <= ncav_per_share * 2 / 3,
     }
 
+
+# ---------------------------------------------------------------------
+# BULL / BEAR narrative defaults: the ends of the company's OWN evidence,
+# not invented percentages. Only the story moves (growth, margin, how fast
+# the margin arrives). The discount rate and failure odds are left alone:
+# a bear case that also raised them would charge for the same risk twice.
+# ---------------------------------------------------------------------
+BULL_GROWTH_CAP = 0.40      # the cap the screens use on a record's growth
+BEAR_GROWTH_FLOOR = -0.20
+BULL_CONVERGENCE_YEARS, BEAR_CONVERGENCE_YEARS = 5, 10
+
+
+def case_defaults(case, growths, margins):
+    """`growths` and `margins`: {label: rate} of observed figures (None
+    values are ignored). Bull takes the highest of each, bear the lowest;
+    growth is held to -20%..+40%. A bear margin is the lowest POSITIVE
+    one (a loss held forever is a liquidation, not a story), when there is
+    one. Returns {"growth": (rate, label, limited), "margin": (rate, label)
+    , "years": n}; a piece with no evidence is None."""
+    if case not in ("bull", "bear"):
+        raise ValueError("case must be 'bull' or 'bear'")
+    pick = max if case == "bull" else min
+    growths = {k: v for k, v in growths.items() if v is not None}
+    margins = {k: v for k, v in margins.items() if v is not None}
+    growth = margin = None
+    if growths:
+        label = pick(growths, key=growths.get)
+        held = min(max(growths[label], BEAR_GROWTH_FLOOR), BULL_GROWTH_CAP)
+        growth = (held, label, held != growths[label])
+    if margins:
+        pool = {k: v for k, v in margins.items() if v > 0} or margins
+        label = pick(pool, key=pool.get)
+        margin = (pool[label], label)
+    return {"growth": growth, "margin": margin,
+            "years": BULL_CONVERGENCE_YEARS if case == "bull" else BEAR_CONVERGENCE_YEARS}
+
 if __name__ == "__main__":
     print("Running self-test with a simple hand-checkable example...\n")
 
@@ -2897,4 +2933,14 @@ if __name__ == "__main__":
     assert graham_value_layers(12.0, 40.0, 35.0, 30.0)["paid_for_growth"] == 0.0
     print("\nGraham layer: NCAV 180, EPV 1,000 = zero-growth terminal value, Graham number 21.21, "
           "checklist and layers check out")
+    # Bull/bear: the ends of the evidence, growth held to -20%..40%, and a
+    # bear margin never a permanent loss when a positive figure exists.
+    g_ev, m_ev = {"cagr": 0.10, "ytd": 0.75, "fy": -0.35, "gap": None}, {"now": -0.05, "industry": 0.20, "cycle": 0.08}
+    bull, bear = case_defaults("bull", g_ev, m_ev), case_defaults("bear", g_ev, m_ev)
+    assert bull["growth"] == (0.40, "ytd", True) and bull["margin"] == (0.20, "industry") and bull["years"] == 5
+    assert bear["growth"] == (-0.20, "fy", True) and bear["margin"] == (0.08, "cycle") and bear["years"] == 10
+    assert case_defaults("bear", {}, {"now": -0.05})["growth"] is None
+    assert case_defaults("bear", {}, {"now": -0.05})["margin"] == (-0.05, "now")
+    print("Bull/bear defaults take the ends of the evidence")
+
     print("\n✓ All self-tests passed. The math is internally consistent.")

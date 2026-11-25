@@ -29,6 +29,7 @@ python3 valuation.py ARM --narrative
 |---|---|---|
 | *(none)* | Profitable, established companies | Multi-stage FCFF DCF. Growth = reinvestment rate × return on capital, fading to a terminal rate. New investment after the forecast earns its cost of capital. |
 | `--narrative` | Story-driven or high-growth companies | Damodaran's "Ginzu" build. Revenue growth, target margin (and the year it's reached), and sales-to-capital (default: his industry ratio) as separate paths. Adds tax-loss carryforwards, a declining early-stage cost of capital, a failure-probability overlay, and checks on whether the story is plausible. |
+| `--bull` / `--bear` | Any narrative | The narrative build with defaults from the best or worst of the company's own evidence (observed growth, held to −20%–40%; today's, cycle and industry margins). Cost of capital and failure odds don't change. Each default shows its source and can be typed over. |
 | `--cyclical` | Commodity and cyclical businesses | Normalizes to the company's average margin over up to 10 years. |
 | `--biotech` | Clinical-stage pharma | Drug-by-drug pipeline value, weighted by probability of approval. |
 | `--reit` | REITs | Dividend discount model on FFO/AFFO, cross-checked against net asset value. |
